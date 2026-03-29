@@ -13,7 +13,7 @@ MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55s
 st.set_page_config(page_title="均線系統", layout="wide")
 st.title("🐯 均線系統：82 檔全自動監控")
 
-# --- 2. 繪圖函數：修正背景黑、中文、加入橡皮擦 ---
+# --- 2. 繪圖函數：修正背景黑、中文、加入橡皮擦、預設不畫線 ---
 def draw_kline(df, sid, name, sP, lP):
     # 建立子圖
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
@@ -28,15 +28,15 @@ def draw_kline(df, sid, name, sP, lP):
         increasing_line_color='#FF3333', decreasing_line_color='#00AA00'
     ), row=1, col=1)
     
-    # 計算並繪製你指定的均線
+    # 計算並繪製你指定的均線 (邏輯不動)
     df_ma = df.copy()
     df_ma['MA_S'] = df_ma['Close'].rolling(window=int(sP)).mean()
     df_ma['MA_L'] = df_ma['Close'].rolling(window=int(lP)).mean()
     
-    # 短均線：加粗
+    # 短均線
     fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_S'], name=f'短均({sP}MA)', 
                              line=dict(color='SpringGreen', width=3)), row=1, col=1)
-    # 長均線：加粗
+    # 長均線
     fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_L'], name=f'長均({lP}MA)', 
                              line=dict(color='Magenta', width=3)), row=1, col=1)
     
@@ -44,32 +44,38 @@ def draw_kline(df, sid, name, sP, lP):
     colors = ['#FF3333' if row['Close'] >= row['Open'] else '#00AA00' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors), row=2, col=1)
 
-    # --- 關鍵修正：背景全黑、修正中文亂碼 ---
+    # --- 關鍵修正：強制全黑背景 + 中文修正 + 預設縮放模式 (不誤觸畫線) ---
     fig.update_layout(
         template="plotly_dark",   # 黑底範本
-        paper_bgcolor="#000000",  # 強制畫布外框全黑
-        plot_bgcolor="#000000",   # 強制內圖背景全黑
+        paper_bgcolor="black",    # 強制畫布外框全黑
+        plot_bgcolor="black",     # 強制內圖背景全黑
         font=dict(
-            family="Microsoft JhengHei, Apple LiGothic, sans-serif", # 強制繁體中文字型
-            size=14
+            family="Microsoft JhengHei, Apple LiGothic, sans-serif", # 修正中文亂碼
+            size=14,
+            color="white"
         ),
         xaxis_rangeslider_visible=False,
         height=800,
-        dragmode='drawline',      # 預設進入畫線模式
+        dragmode='zoom',          # 預設為縮放/移動模式，避免一碰就畫線
         newshape=dict(line_color='White', line_width=4), # 手劃線設定
         margin=dict(t=80, b=50, l=10, r=10)
     )
 
+    # 確保座標軸也是黑底風格
+    fig.update_xaxes(gridcolor='rgba(255,255,255,0.1)')
+    fig.update_yaxes(gridcolor='rgba(255,255,255,0.1)')
+
     # --- 關鍵修正：開啟橡皮擦與畫線工具籃 ---
     config = {
         'modeBarButtonsToAdd': [
-            'drawline', 
-            'drawrect', 
-            'eraseshape'  # ⬅️ 橡皮擦工具，點擊後可刪除你劃的線
+            'drawline',     # 畫線工具
+            'drawrect',     # 畫框工具
+            'eraseshape'    # 橡皮擦工具 (點擊後可擦除手繪線)
         ],
         'scrollZoom': True, 
         'displaylogo': False,
-        'displayModeBar': True # 強制顯示工具籃
+        'displayModeBar': True, # 強制工具列顯示
+        'modeBarButtonsToRemove': ['lasso2d', 'select2d'] # 移除不常用工具
     }
     
     st.plotly_chart(fig, use_container_width=True, config=config)
@@ -143,7 +149,7 @@ def run_precise_scan():
         st.session_state["results"] = final_list
     except Exception as e: st.error(f"❌ 讀取錯誤: {e}")
 
-# --- 4. 顯示與看圖邏輯 (完全不動) ---
+# --- 4. 顯示與看圖邏輯 (邏輯完全不動) ---
 if "results" not in st.session_state:
     run_precise_scan()
 
