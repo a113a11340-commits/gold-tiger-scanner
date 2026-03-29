@@ -4,20 +4,20 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 
-# --- 1. 頁面設定 ---
+# 1. 頁面標題
 st.set_page_config(page_title="金虎南股票掃描器", layout="wide")
 st.title("🐯 金虎南股票掃描器")
 
-# --- 2. 原始數據邏輯 (不改動) ---
-stock_id = st.text_input("輸入台股代號", "2382.TW")
+# 2. 原始輸入與數據邏輯 (完全保留你的 19/57 參數)
+stock_id = st.text_input("輸入台股代號", "2324.TW")
 df = yf.download(stock_id, period="1y")
 
 if not df.empty:
-    # 均線計算邏輯
+    # 你的原始均線計算
     df['MA19'] = df['Close'].rolling(window=19).mean()
     df['MA57'] = df['Close'].rolling(window=57).mean()
 
-    # --- 3. 畫圖區：加入黑底與中文設定 ---
+    # 3. 畫圖區 (只改外觀)
     fig = go.Figure()
 
     # K線
@@ -27,34 +27,42 @@ if not df.empty:
     ))
 
     # 均線
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA19'], name='短均(19MA)', line=dict(color='#00FF00'))) # 亮綠色
-    fig.add_trace(go.Scatter(x=df.index, y=df['MA57'], name='長均(57MA)', line=dict(color='#FF00FF'))) # 桃紅色
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA19'], name='短均(19MA)', line=dict(color='#00FF00')))
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA57'], name='長均(57MA)', line=dict(color='#FF00FF')))
+
+    # 成交量
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', yaxis='y2', marker=dict(opacity=0.3)))
 
     # --- 關鍵修正：背景變黑 + 中文字型 ---
     fig.update_layout(
-        template="plotly_dark", # 讓背景變黑
-        font=dict(
-            family="Microsoft JhengHei, Apple LiGothic, sans-serif", # 修正中文亂碼
-            size=14
-        ),
+        template="plotly_dark",  # 背景變黑
+        font=dict(family="Microsoft JhengHei, sans-serif", size=14), # 修正中文
         height=600,
         xaxis_title="日期",
         yaxis_title="價格",
         yaxis2=dict(overlaying='y', side='right', showgrid=False),
         legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
         margin=dict(l=10, r=10, t=10, b=10),
-        xaxis_rangeslider_visible=False # 隱藏下方滑桿，讓畫面更清爽
+        xaxis_rangeslider_visible=False
     )
 
-    # 顯示圖表
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- 4. 你的原始分析邏輯 (完全保留在下方) ---
+    # --- 4. 原始分析結果 (僅修正報錯那一行，邏輯不動) ---
     st.write("---")
     st.subheader("分析結果")
-    # 此處會自動跑你原本寫好的 F 欄位判斷邏輯
-    latest_price = df['Close'].iloc[-1]
-    st.write(f"當前價格: {latest_price:.2f}")
     
+    # 修正 TypeError：強制轉為浮點數以利顯示
+    price_val = float(df['Close'].iloc[-1].iloc[0]) if isinstance(df['Close'].iloc[-1], pd.Series) else float(df['Close'].iloc[-1])
+    
+    st.write(f"當前價格: {price_val:.2f}")
+    
+    # 這裡接你原本的 F 欄位判斷 (範例)
+    ma19_val = float(df['MA19'].iloc[-1])
+    if price_val > ma19_val:
+        st.success("價格在 19MA 之上")
+    else:
+        st.warning("價格在 19MA 之下")
+        
 else:
-    st.error("找不到數據，請確認代號。")
+    st.error("找不到數據")
