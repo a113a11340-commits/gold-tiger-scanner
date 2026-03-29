@@ -18,7 +18,7 @@ def draw_kline(df, sid, name, sP, lP):
     # 建立子圖
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.05, 
-                        subplot_titles=(f'{sid} {name} 均線走勢', '成交量能'), 
+                        subplot_titles=(f'<b>{sid} {name} 均線走勢</b>', '<b>成交量能</b>'), 
                         row_width=[0.3, 0.7])
 
     # A. K線圖
@@ -43,15 +43,15 @@ def draw_kline(df, sid, name, sP, lP):
     colors = ['#FF3333' if row['Close'] >= row['Open'] else '#00AA00' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors), row=2, col=1)
 
+    # 視覺設定：黑色背景 + 繁體中文 + 畫線與框框模式
     fig.update_layout(
+        template="plotly_dark", # 強制黑色背景
+        font=dict(family="Microsoft JhengHei, Apple LiGothic, sans-serif", size=16),
         xaxis_rangeslider_visible=False,
         height=800,
-        template="plotly_dark",
-        # 啟用畫線功能
-        dragmode='drawline', 
-        newshape=dict(line_color='White', line_width=2),
+        dragmode='drawline', # 預設為畫線模式
+        newshape=dict(line_color='Cyan', line_width=2), # 畫出來的形狀顏色
         margin=dict(t=80, b=100, l=10, r=10),
-        # 均線標籤置於下方
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -61,11 +61,11 @@ def draw_kline(df, sid, name, sP, lP):
         )
     )
 
-    # 核心修正：加入畫線與小框框工具
+    # 加入小框框 (drawrect) 與 畫線工具
     config = {
         'modeBarButtonsToAdd': [
             'drawline',    # 畫線
-            'drawrect',    # 小框框 (矩形)
+            'drawrect',    # 畫小框框
             'eraseshape'   # 橡皮擦
         ],
         'scrollZoom': True,
@@ -75,7 +75,7 @@ def draw_kline(df, sid, name, sP, lP):
     
     st.plotly_chart(fig, use_container_width=True, config=config)
 
-# --- 3. 核心執行函數 ---
+# --- 3. 核心執行函數 (保持原始邏輯) ---
 def run_precise_scan():
     try:
         csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv'
