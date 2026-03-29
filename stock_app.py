@@ -33,10 +33,9 @@ def draw_kline(df, sid, name, sP, lP):
     df_ma['MA_S'] = df_ma['Close'].rolling(window=int(sP)).mean()
     df_ma['MA_L'] = df_ma['Close'].rolling(window=int(lP)).mean()
     
-    # 短均線：改細（width=1.5）
+    # 均線設定為細線 (width=1.5)
     fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_S'], name=f'短均({sP}MA)', 
                              line=dict(color='SpringGreen', width=1.5)), row=1, col=1)
-    # 長均線：改細（width=1.5）
     fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_L'], name=f'長均({lP}MA)', 
                              line=dict(color='Magenta', width=1.5)), row=1, col=1)
     
@@ -48,9 +47,11 @@ def draw_kline(df, sid, name, sP, lP):
         xaxis_rangeslider_visible=False,
         height=800,
         template="plotly_dark",
-        dragmode='pan', # 移除畫線功能，改為平移模式
-        margin=dict(t=80, b=100, l=10, r=10), # 增加下方邊距
-        # 將均線標籤（Legend）改到圖下方
+        # 啟用畫線功能
+        dragmode='drawline', 
+        newshape=dict(line_color='White', line_width=2),
+        margin=dict(t=80, b=100, l=10, r=10),
+        # 均線標籤置於下方
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -60,9 +61,13 @@ def draw_kline(df, sid, name, sP, lP):
         )
     )
 
-    # 移除畫線工具按鈕
+    # 核心修正：加入畫線與小框框工具
     config = {
-        'modeBarButtonsToRemove': ['drawline', 'drawrect', 'eraseshape', 'drawcircle', 'drawopenpath', 'drawclosedpath', 'drawline'],
+        'modeBarButtonsToAdd': [
+            'drawline',    # 畫線
+            'drawrect',    # 小框框 (矩形)
+            'eraseshape'   # 橡皮擦
+        ],
         'scrollZoom': True,
         'displaylogo': False,
         'displayModeBar': True
