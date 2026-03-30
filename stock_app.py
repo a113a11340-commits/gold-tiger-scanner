@@ -63,8 +63,8 @@ if "first_run" not in st.session_state:
 
 # --- 3. 繪圖函數 (修改高度、網格、時間範圍) ---
 def draw_kline(df, sid, name, sP, lP):
-    # 修改點 1：只取最後 120 筆資料 (約半年) 進行繪圖
-    plot_df = df.tail(120) 
+    # 修改點 1：只取最後 60 筆資料 (約3個月) 進行繪圖
+    plot_df = df.tail(60) 
     
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -72,9 +72,9 @@ def draw_kline(df, sid, name, sP, lP):
         increasing_line_color='#FF3333', decreasing_line_color='#00AA00', line=dict(width=0.5)
     ))
     
-    # 均線計算需用原始 df (確保 250 天數據充足)，但只畫出最後 120 天
-    ma_s = df['Close'].rolling(window=int(sP)).mean().tail(120)
-    ma_l = df['Close'].rolling(window=int(lP)).mean().tail(120)
+    # 均線計算需用原始 df (確保 250 天數據充足)，但只畫出最後 60 天
+    ma_s = df['Close'].rolling(window=int(sP)).mean().tail(60)
+    ma_l = df['Close'].rolling(window=int(lP)).mean().tail(60)
     
     fig.add_trace(go.Scatter(x=plot_df.index, y=ma_s, name='短', line=dict(color='SpringGreen', width=0.5)))
     fig.add_trace(go.Scatter(x=plot_df.index, y=ma_l, name='長', line=dict(color='Magenta', width=0.5)))
