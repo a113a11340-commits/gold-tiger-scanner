@@ -10,9 +10,9 @@ st.set_page_config(layout="wide", page_title="均線監控系統")
 st.markdown('<style>div.block-container{padding-top:1rem;}</style>', unsafe_allow_html=True)
 
 # ⚠️ 請務必替換為您的試算表網址
-MY_SHEET_URL = "您的試算表網址"
+MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit?gid=0#gid=0"
 
-# --- 2. 核心掃描邏輯 ---
+# --- 2. 核心掃描邏輯 (嚴格過濾：無訊號不顯示) ---
 def run_precise_scan():
     try:
         csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv'
@@ -20,19 +20,32 @@ def run_precise_scan():
         res.encoding = 'utf-8'
         df_sheet = pd.read_csv(io.StringIO(res.text))
         
-        # 抓取 A(代號), B(名稱), C(短均), D(長均), F(訊號), G(量能)
+        # 讀取 A(代號), B(名稱), C(短均), D(長均), F(訊號), G(量能)
         raw_rows = df_sheet.iloc[:, [0, 1, 2, 3, 5, 6]].values.tolist()
-        valid_stocks = [r for r in raw_rows if pd.notnull(r[0])]
+        
+        # 關鍵修正：必須同時有「代號」與「訊號」文字才處理
+        valid_stocks = []
+        for r in raw_rows:
+            sid_val = str(r[0]).strip() if pd.notnull(r[0]) else ""
+            signal_val = str(r[4]).strip() if pd.notnull(r[4]) else ""
+            
+            # 只有當訊號欄位不是空的，才算有效
+            if sid_val != "" and signal_val != "":
+                valid_stocks.append(r)
         
         final_results = []
+        if not valid_stocks:
+            st.session_state["results"] = []
+            st.info("目前無任何觸發訊號。")
+            return
+
         p_bar = st.progress(0)
-        
         for i, item in enumerate(valid_stocks):
             try:
                 sid_raw = str(item[0]).split('.')[0].strip()
                 name = str(item[1])
                 s_p, l_p = int(float(item[2])), int(float(item[3]))
-                sign, vol = str(item[4]) if pd.notnull(item[4]) else "", str(item[5]) if pd.notnull(item[5]) else ""
+                sign, vol = str(item[4]), str(item[5]) if pd.notnull(item[5]) else ""
                 
                 sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
                 df = yf.download(sid_full, period="250d", progress=False)
@@ -47,16 +60,15 @@ def run_precise_scan():
             p_bar.progress((i + 1) / len(valid_stocks))
             
         st.session_state["results"] = final_results
-        st.session_state["first_run"] = True # 標記已完成初始掃描
+        st.session_state["first_run"] = True
     except Exception as e:
-        st.error(f"❌ 初始掃描失敗: {e}")
+        st.error(f"❌ 掃描失敗: {e}")
 
-# --- 3. 自動執行檢查 ---
-# 如果是第一次進入頁面，自動執行掃描
+# --- 3. 自動執行 ---
 if "first_run" not in st.session_state:
     run_precise_scan()
 
-# --- 4. 繪圖函數 (極簡、透明、雙線) ---
+# --- 4. 繪圖函數 (透明背景、100高度、雙均線) ---
 def draw_kline(df, sid, name, sP, lP):
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -64,7 +76,7 @@ def draw_kline(df, sid, name, sP, lP):
         increasing_line_color='#FF3333', decreasing_line_color='#00AA00', line=dict(width=0.5)
     ))
     
-    # 計算並畫出雙均線
+    # 畫出雙均線
     ma_s = df['Close'].rolling(window=int(sP)).mean()
     ma_l = df['Close'].rolling(window=int(lP)).mean()
     fig.add_trace(go.Scatter(x=df.index, y=ma_s, name='短', line=dict(color='SpringGreen', width=0.5)))
@@ -72,11 +84,11 @@ def draw_kline(df, sid, name, sP, lP):
     
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        height=100, margin=dict(t=5, b=5, l=0, r=0), # 高度 100
+        height=100, margin=dict(t=5, b=5, l=0, r=0), 
         xaxis_rangeslider_visible=False, showlegend=False, 
+        font=dict(size=8), dragmode='pan',
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, fixedrange=True),
-        dragmode='pan'
+        yaxis=dict(showgrid=False, zeroline=False, fixedrange=True)
     )
     st.markdown('<style>div[data-testid="stPlotlyChart"] { background-color: transparent !important; }</style>', unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True, 'displaylogo': False})
@@ -84,13 +96,12 @@ def draw_kline(df, sid, name, sP, lP):
 # --- 5. 介面呈現 ---
 st.title("📈 均線監控系統")
 
-# 雖然會自動掃描，但仍保留手動更新按鈕備用
 if st.button("🔄 手動更新數據", use_container_width=True):
     run_precise_scan()
 
-if "results" in st.session_state:
+if "results" in st.session_state and st.session_state["results"]:
     res_df = pd.DataFrame(st.session_state["results"])
-    # 合併訊號與量能，節省空間
+    # 合併訊號與量能
     res_df["訊號/量能"] = res_df["訊號"].astype(str) + " | " + res_df["量能"].astype(str)
     
     st.table(res_df[["sid", "名稱", "現價", "訊號/量能"]])
