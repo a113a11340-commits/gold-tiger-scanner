@@ -9,13 +9,17 @@ import io
 st.set_page_config(layout="wide", page_title="均線監控系統")
 st.markdown('<style>div.block-container{padding-top:1rem;}</style>', unsafe_allow_html=True)
 
-# 請在此處填寫您的試算表 URL
-MY_SHEET_URL = "您的試算表網址"
+# ⚠️ 請在此處填入您實際的試算表網址
+MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit?gid=0#gid=0"
 
 # --- 核心邏輯：掃描試算表與抓取資料 ---
 def run_precise_scan():
     try:
         # 1. 讀取 Google 試算表 (匯出 CSV 格式)
+        if "您的試算表網址" in MY_SHEET_URL:
+            st.error("請先在程式碼中修改 MY_SHEET_URL 為您實際的試算表網址！")
+            return
+
         csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv'
         res = requests.get(csv_url, timeout=10)
         res.encoding = 'utf-8'
@@ -32,11 +36,12 @@ def run_precise_scan():
             try:
                 sid_raw = str(item[0]).split('.')[0].strip()
                 name = str(item[1])
-                sP, lP = int(float(item[2])), int(float(item[3]))
+                sP = int(float(item[2]))
+                lP = int(float(item[3]))
                 sheet_signal = str(item[4]) if pd.notnull(item[4]) else ""
                 sheet_volume = str(item[5]) if pd.notnull(item[5]) else ""
                 
-                # 抓取 Yahoo Finance 資料 (預設 250 天)
+                # 抓取 Yahoo Finance 資料
                 sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
                 df = yf.download(sid_full, period="250d", progress=False)
                 
@@ -60,7 +65,7 @@ def run_precise_scan():
     except Exception as e:
         st.error(f"❌ 讀取發生錯誤: {e}")
 
-# --- 核心繪圖函數 (雙線、透明、低高度) ---
+# --- 核心繪圖函數 (雙線、透明、高度100) ---
 def draw_kline(df, sid, name, sP, lP):
     fig = go.Figure()
 
@@ -71,11 +76,12 @@ def draw_kline(df, sid, name, sP, lP):
         line=dict(width=0.5)
     ))
     
-    # 同時計算與顯示雙均線
+    # 計算並顯示雙均線
     df_ma = df.copy()
     ma_s = df_ma['Close'].rolling(window=int(sP)).mean()
     ma_l = df_ma['Close'].rolling(window=int(lP)).mean()
     
+    # 短均(綠)與長均(紫)
     fig.add_trace(go.Scatter(x=df_ma.index, y=ma_s, name='短', line=dict(color='SpringGreen', width=0.5)))
     fig.add_trace(go.Scatter(x=df_ma.index, y=ma_l, name='長', line=dict(color='Magenta', width=0.5)))
     
@@ -95,18 +101,17 @@ def draw_kline(df, sid, name, sP, lP):
     config = {
         'displayModeBar': True,
         'displaylogo': False,
-        'modeBarButtonsToAdd': ['zoomIn2d', 'zoomOut2d'],
+        'modeBarButtonsToAdd': ['zoomIn2d', 'zoomOut2d'], # 放大縮小按鈕
         'modeBarButtonsToRemove': ['toImage', 'select2d', 'lasso2d', 'pan2d', 'zoom2d', 'autoScale2d', 'resetScale2d']
     }
     
-    # 確保透明背景
     st.markdown('<style>div[data-testid="stPlotlyChart"] { background-color: transparent !important; }</style>', unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, config=config)
 
 # --- 介面呈現 ---
 st.title("📈 均線監控系統")
 
-if st.button("🔄 重新執行掃描", use_container_width=True):
+if st.button("🔄 重新執行掃描", use_container_width=True): # 掃描按鈕
     run_precise_scan()
 
 if "results" in st.session_state:
