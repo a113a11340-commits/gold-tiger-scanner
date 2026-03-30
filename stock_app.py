@@ -9,10 +9,10 @@ import io
 st.set_page_config(layout="wide", page_title="均線監控系統")
 st.markdown('<style>div.block-container{padding-top:1rem;}</style>', unsafe_allow_html=True)
 
-# 你的試算表網址
+# 你的原始試算表網址
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1XpGq9Zl6O5eX-pD8O0A-f0oT9U_T0X7uO_Vp9I6Z_E/edit"
 
-# --- 2. 核心掃描邏輯 ---
+# --- 2. 核心掃描邏輯 (完全還原原始邏輯) ---
 def run_precise_scan():
     try:
         csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv'
@@ -20,12 +20,12 @@ def run_precise_scan():
         res.encoding = 'utf-8'
         df_sheet = pd.read_csv(io.StringIO(res.text))
         
-        # 確保讀取 A, B, C, D, F, G 欄位
+        # 讀取 A, B, C, D, F, G 欄位
         raw_rows = df_sheet.iloc[:, [0, 1, 2, 3, 5, 6]].values.tolist()
         valid_stocks = [r for r in raw_rows if pd.notnull(r[0])]
         
         final_results = []
-        p_bar = st.progress(0, text="正在同步試算表數據...")
+        p_bar = st.progress(0)
         
         for i, item in enumerate(valid_stocks):
             try:
@@ -33,7 +33,6 @@ def run_precise_scan():
                 name = str(item[1])
                 s_p = int(float(item[2]))
                 l_p = int(float(item[3]))
-                # 預防空值導致合併失敗
                 sign = str(item[4]) if pd.notnull(item[4]) else ""
                 vol = str(item[5]) if pd.notnull(item[5]) else ""
                 
@@ -45,23 +44,21 @@ def run_precise_scan():
                     final_results.append({
                         "sid": sid_full, "名稱": name, 
                         "現價": f"{df['Close'].iloc[-1]:.2f}", 
-                        "訊號/量能": f"{sign} | {vol}", # 直接在這裡合併，避免後面 KeyError
+                        "訊號": sign, "量能": vol,
                         "df": df, "sP": s_p, "lP": l_p
                     })
             except: continue
             p_bar.progress((i + 1) / len(valid_stocks))
-        
-        p_bar.empty()
+            
         st.session_state["results"] = final_results
-        st.session_state["initialized"] = True 
     except Exception as e:
-        st.error(f"❌ 掃描失敗: {e}")
+        st.error(f"系統錯誤: {e}")
 
-# --- 3. 自動執行控制 ---
-if "initialized" not in st.session_state:
+# --- 3. 初始自動執行 ---
+if "results" not in st.session_state:
     run_precise_scan()
 
-# --- 4. 繪圖函數 (150高、排假日、灰網格) ---
+# --- 4. 繪圖函數 (僅修改高度與排除假日) ---
 def draw_kline(df, sid, name, sP, lP):
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -69,7 +66,7 @@ def draw_kline(df, sid, name, sP, lP):
         increasing_line_color='#FF3333', decreasing_line_color='#00AA00', line=dict(width=0.5)
     ))
     
-    # 雙均線顯示
+    # 雙均線
     ma_s = df['Close'].rolling(window=int(sP)).mean()
     ma_l = df['Close'].rolling(window=int(lP)).mean()
     fig.add_trace(go.Scatter(x=df.index, y=ma_s, name='短', line=dict(color='SpringGreen', width=0.5)))
@@ -77,14 +74,18 @@ def draw_kline(df, sid, name, sP, lP):
     
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        height=150, margin=dict(t=5, b=5, l=0, r=0), 
+        height=150, # 修改 1: 高度 150
+        margin=dict(t=5, b=5, l=0, r=0), 
         xaxis_rangeslider_visible=False, showlegend=False, 
         font=dict(size=8, color="white"), dragmode='pan',
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, rangebreaks=[dict(bounds=["sat", "mon"])]),
+        xaxis=dict(
+            showgrid=False, zeroline=False, showticklabels=False, 
+            rangebreaks=[dict(bounds=["sat", "mon"])] # 修改 2: 排除假日
+        ),
         yaxis=dict(showgrid=True, gridcolor='rgba(128, 128, 128, 0.3)', zeroline=False, fixedrange=True, side='right')
     )
     st.markdown('<style>div[data-testid="stPlotlyChart"] { background-color: transparent !important; }</style>', unsafe_allow_html=True)
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar':True, 'displaylogo':False})
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True, 'displaylogo': False})
 
 # --- 5. 介面呈現 ---
 st.title("📈 均線監控系統")
@@ -92,14 +93,11 @@ st.title("📈 均線監控系統")
 if st.button("🔄 重新執行掃描", use_container_width=True):
     run_precise_scan()
 
-# 顯示表格與圖表按鈕
-if "results" in st.session_state and st.session_state["results"]:
+if "results" in st.session_state:
     res_df = pd.DataFrame(st.session_state["results"])
-    
-    # 僅顯示核心資訊，節省手機空間
-    st.table(res_df[["sid", "名稱", "現價", "訊號/量能"]])
+    # 保持原始表格顯示方式
+    st.table(res_df[["sid", "名稱", "現價", "訊號", "量能"]])
     
     for idx, res in enumerate(st.session_state["results"]):
-        # 大按鈕方便點擊
         if st.button(f"📊 {res['sid']} {res['名稱']}", key=f"btn_{idx}", use_container_width=True):
             draw_kline(res["df"], res["sid"], res["名稱"], res["sP"], res["lP"])
