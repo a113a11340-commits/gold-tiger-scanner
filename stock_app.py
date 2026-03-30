@@ -20,12 +20,12 @@ def run_precise_scan():
         res.encoding = 'utf-8'
         df_sheet = pd.read_csv(io.StringIO(res.text))
         
-        # 讀取 A, B, C, D, F, G 欄位
+        # 確保讀取 A, B, C, D, F, G 欄位
         raw_rows = df_sheet.iloc[:, [0, 1, 2, 3, 5, 6]].values.tolist()
         valid_stocks = [r for r in raw_rows if pd.notnull(r[0])]
         
         final_results = []
-        p_bar = st.progress(0)
+        p_bar = st.progress(0, text="正在同步試算表數據...")
         
         for i, item in enumerate(valid_stocks):
             try:
@@ -33,6 +33,7 @@ def run_precise_scan():
                 name = str(item[1])
                 s_p = int(float(item[2]))
                 l_p = int(float(item[3]))
+                # 預防空值導致合併失敗
                 sign = str(item[4]) if pd.notnull(item[4]) else ""
                 vol = str(item[5]) if pd.notnull(item[5]) else ""
                 
@@ -44,19 +45,20 @@ def run_precise_scan():
                     final_results.append({
                         "sid": sid_full, "名稱": name, 
                         "現價": f"{df['Close'].iloc[-1]:.2f}", 
-                        "訊號": sign, "量能": vol,
+                        "訊號/量能": f"{sign} | {vol}", # 直接在這裡合併，避免後面 KeyError
                         "df": df, "sP": s_p, "lP": l_p
                     })
             except: continue
             p_bar.progress((i + 1) / len(valid_stocks))
-            
+        
+        p_bar.empty()
         st.session_state["results"] = final_results
-        st.session_state["first_run"] = True 
+        st.session_state["initialized"] = True 
     except Exception as e:
         st.error(f"❌ 掃描失敗: {e}")
 
-# --- 3. 自動執行檢查 ---
-if "first_run" not in st.session_state:
+# --- 3. 自動執行控制 ---
+if "initialized" not in st.session_state:
     run_precise_scan()
 
 # --- 4. 繪圖函數 (150高、排假日、灰網格) ---
@@ -67,6 +69,7 @@ def draw_kline(df, sid, name, sP, lP):
         increasing_line_color='#FF3333', decreasing_line_color='#00AA00', line=dict(width=0.5)
     ))
     
+    # 雙均線顯示
     ma_s = df['Close'].rolling(window=int(sP)).mean()
     ma_l = df['Close'].rolling(window=int(lP)).mean()
     fig.add_trace(go.Scatter(x=df.index, y=ma_s, name='短', line=dict(color='SpringGreen', width=0.5)))
@@ -89,13 +92,14 @@ st.title("📈 均線監控系統")
 if st.button("🔄 重新執行掃描", use_container_width=True):
     run_precise_scan()
 
-# 修正 KeyError 的地方：加入 if 判斷
-if "results" in st.session_state and len(st.session_state["results"]) > 0:
+# 顯示表格與圖表按鈕
+if "results" in st.session_state and st.session_state["results"]:
     res_df = pd.DataFrame(st.session_state["results"])
-    res_df["訊號/量能"] = res_df["訊號"].astype(str) + " | " + res_df["量能"].astype(str)
     
+    # 僅顯示核心資訊，節省手機空間
     st.table(res_df[["sid", "名稱", "現價", "訊號/量能"]])
     
     for idx, res in enumerate(st.session_state["results"]):
+        # 大按鈕方便點擊
         if st.button(f"📊 {res['sid']} {res['名稱']}", key=f"btn_{idx}", use_container_width=True):
             draw_kline(res["df"], res["sid"], res["名稱"], res["sP"], res["lP"])
