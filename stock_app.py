@@ -1,85 +1,14 @@
-# -*- coding: utf-8 -*-
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import io
-import requests
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-# --- 1. 設定你的專屬網址 ---
-MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit?gid=0#gid=0" 
-
-st.set_page_config(page_title="均線系統", layout="wide")
-st.title("🐯 均線系統：全自動監控")
-
-# --- 2. 繪圖函數：修正比例、預設不手繪、含橡皮擦 ---
-def draw_kline(df, sid, name, sP, lP):
-    # 建立子圖
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                        vertical_spacing=0.05, 
-                        subplot_titles=(f'{sid} {name} 均線走勢', '成交量能'), 
-                        row_width=[0.3, 0.7])
-
-    # K線圖
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], 
-        name='K線',
-        increasing_line_color='#FF3333', decreasing_line_color='#00AA00'
-    ), row=1, col=1)
-    
-    # 均線計算
-    df_ma = df.copy()
-    df_ma['MA_S'] = df_ma['Close'].rolling(window=int(sP)).mean()
-    df_ma['MA_L'] = df_ma['Close'].rolling(window=int(lP)).mean()
-    
-    # 短均 (預設顯示)
-    fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_S'], name=f'短均({sP}MA)', 
-                             line=dict(color='SpringGreen', width=2)), row=1, col=1)
-    
-    # 長均 (預設隱藏：點擊圖例才顯示)
-    fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_L'], name=f'長均({lP}MA)', 
-                             visible='legendonly', 
-                             line=dict(color='Magenta', width=2)), row=1, col=1)
-    
-    # 成交量
-    colors = ['#FF3333' if row['Close'] >= row['Open'] else '#00AA00' for index, row in df.iterrows()]
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors), row=2, col=1)
-
-    # 畫面外觀與行為設定
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="black",
-        plot_bgcolor="black",
-        font=dict(family="Microsoft JhengHei", size=14, color="white"),
-        xaxis_rangeslider_visible=False,
-        # 【修正】高度調降為 500，讓手機畫面看起來比較「寬」
-        height=500, 
-        # 【修正】預設為平移模式 (不預設劃線、不預設縮放)
-        dragmode='pan', 
-        newshape=dict(line_color='White', line_width=2),
-        margin=dict(t=50, b=50, l=10, r=10)
-    )
-
-    # 工具列配置：加入橡皮擦
-    config = {
-        'scrollZoom': True,
-        'displayModeBar': True,
-        'displaylogo': False,
-        'modeBarButtonsToAdd': ['drawline', 'eraseshape'], # 確保有劃線和橡皮擦
-        'modeBarButtonsToRemove': ['lasso2d', 'select2d', 'zoom2d'] # 移除誤觸按鈕
-    }
-    
-    st.plotly_chart(fig, use_container_width=True, config=config)
-
-# --- 3. 掃描與執行邏輯 ---
+# --- 修正後的 3. 掃描與執行邏輯 ---
 def run_precise_scan():
     try:
         csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv'
         res = requests.get(csv_url, timeout=10)
         res.encoding = 'utf-8'
         df_sheet = pd.read_csv(io.StringIO(res.text))
-        raw_rows = df_sheet.iloc[:, [0, 1, 2, 3]].values.tolist()
+        
+        # 抓取前 6 欄 (0=代號, 1=名稱, 2=短均, 3=長均, 5=自訂訊號)
+        # 注意：iloc[:, [0, 1, 2, 3, 5]] 代表 A, B, C, D, F 欄
+        raw_rows = df_sheet.iloc[:, [0, 1, 2, 3, 5]].values.tolist()
         valid_stocks = [r for r in raw_rows if pd.notnull(r[0]) and str(r[0]).strip() != ""]
         
         final_list = [] 
@@ -88,14 +17,20 @@ def run_precise_scan():
             try:
                 sid_raw = str(item[0]).split('.')[0].strip()
                 name = str(item[1])
-                sP, lP = (int(float(item[2])) if pd.notnull(item[2]) else 21), (int(float(item[3])) if pd.notnull(item[3]) else 152)
+                sP = (int(float(item[2])) if pd.notnull(item[2]) else 21)
+                lP = (int(float(item[3])) if pd.notnull(item[3]) else 152)
+                # --- 關鍵修正：讀取 F 欄內容 ---
+                sheet_signal = str(item[4]) if pd.notnull(item[4]) else ""
+                
                 sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
                 df = yf.download(sid_full, period="250d", interval="1d", progress=False)
+                
                 if df.empty or len(df) < lP: continue
                 df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
                 curPrice = float(df['Close'].iloc[-1])
-                pList = [curPrice] + df['Close'].tolist()[::-1][1:]
                 
+                # 保留原有掃描邏輯，但顯示內容改用 F 欄
+                pList = [curPrice] + df['Close'].tolist()[::-1][1:]
                 def getMA(arr, per, off):
                     p = int(per)
                     return sum(arr[off : p + off]) / p if len(arr) >= p + off else 0
@@ -103,32 +38,43 @@ def run_precise_scan():
                 maST, maSY = getMA(pList, sP, 0), getMA(pList, sP, 1)
                 maLT, maLY, maLB = getMA(pList, lP, 0), getMA(pList, lP, 1), getMA(pList, lP, 2)
                 
-                sigs, is_alert = [], False
-                if pList[1] >= maSY and pList[0] < maST: 
-                    sigs.append(f"跌破短均[停損]"); is_alert = True
-                elif pList[2] < maLB and pList[1] > maSY and df['Low'].iloc[-1] > maLT: 
-                    sigs.append(f"2日法則[加碼]"); is_alert = True
-                elif pList[1] < maSY and pList[0] > maST: 
-                    sigs.append(f"突破短均[進場]"); is_alert = True
+                # 判斷是否需要加入清單 (觸發條件不變)
+                is_alert = False
+                if (pList[1] >= maSY and pList[0] < maST) or \
+                   (pList[2] < maLB and pList[1] > maSY and df['Low'].iloc[-1] > maLT) or \
+                   (pList[1] < maSY and pList[0] > maST):
+                    is_alert = True
                 
                 if is_alert:
-                    final_list.append({"sid": sid_full, "名稱": name, "現價": f"{curPrice:.2f}", "訊號": " + ".join(sigs), "df": df, "sP": sP, "lP": lP})
+                    final_list.append({
+                        "sid": sid_full, 
+                        "名稱": name, 
+                        "現價": f"{curPrice:.2f}", 
+                        "訊號": sheet_signal, # ⬅️ 這裡改為顯示 F 欄內容
+                        "df": df, 
+                        "sP": sP, 
+                        "lP": lP
+                    })
             except Exception: continue
             bar.progress((i + 1) / len(valid_stocks))
         st.session_state["results"] = final_list
     except Exception as e: st.error(f"❌ 讀取錯誤: {e}")
 
-# --- 4. 主介面顯示 ---
-if "results" not in st.session_state:
-    run_precise_scan()
-
-if st.session_state.get("results"):
-    df_show = pd.DataFrame(st.session_state["results"])[["sid", "名稱", "現價", "訊號"]]
-    st.table(df_show)
-    for idx, res in enumerate(st.session_state["results"]):
-        if st.button(f"📈 繪製圖形: {res['sid']} {res['名稱']}", key=f"btn_{idx}"):
-            draw_kline(res["df"], res["sid"], res["名稱"], res["sP"], res["lP"])
-
-if st.sidebar.button("重新掃描"):
-    st.session_state.pop("results", None)
-    st.rerun()
+# --- 繪圖函數維持上一次調整好的 (黑底、寬比例、下方圖例、中文化) ---
+def draw_kline(df, sid, name, sP, lP):
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                        vertical_spacing=0.05, 
+                        subplot_titles=(f'{sid} {name} 均線走勢', '成交量能'), 
+                        row_width=[0.3, 0.7])
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線', increasing_line_color='#FF3333', decreasing_line_color='#00AA00'), row=1, col=1)
+    df_ma = df.copy()
+    df_ma['MA_S'] = df_ma['Close'].rolling(window=int(sP)).mean()
+    df_ma['MA_L'] = df_ma['Close'].rolling(window=int(lP)).mean()
+    fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_S'], name=f'短均({sP}MA)', line=dict(color='SpringGreen', width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_L'], name=f'長均({lP}MA)', visible='legendonly', line=dict(color='Magenta', width=2)), row=1, col=1)
+    colors = ['#FF3333' if row['Close'] >= row['Open'] else '#00AA00' for index, row in df.iterrows()]
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors), row=2, col=1)
+    fig.update_layout(template="plotly_dark", paper_bgcolor="black", plot_bgcolor="black", font=dict(family="Microsoft JhengHei", size=14, color="white"), xaxis_rangeslider_visible=False, height=500, dragmode='pan', newshape=dict(line_color='White', line_width=2), margin=dict(t=50, b=50, l=10, r=10),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5))
+    config = {'scrollZoom': True, 'displayModeBar': True, 'displaylogo': False, 'modeBarButtonsToAdd': ['drawline', 'eraseshape'], 'modeBarButtonsToRemove': ['lasso2d', 'select2d', 'zoom2d'], 'locale': 'zh-TW'}
+    st.plotly_chart(fig, use_container_width=True, config=config)
