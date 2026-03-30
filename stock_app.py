@@ -7,14 +7,15 @@ import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# --- 1. 資料來源設定 ---
+# --- 1. 設定你的專屬網址 ---
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit?gid=0#gid=0" 
 
 st.set_page_config(page_title="均線系統", layout="wide")
 st.title("🐯 均線系統：全自動監控")
 
-# --- 2. 繪圖函數：黑底、平移模式、預設隱藏長均、含橡皮擦 ---
+# --- 2. 繪圖函數：修正比例、預設不手繪、含橡皮擦 ---
 def draw_kline(df, sid, name, sP, lP):
+    # 建立子圖
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.05, 
                         subplot_titles=(f'{sid} {name} 均線走勢', '成交量能'), 
@@ -32,11 +33,11 @@ def draw_kline(df, sid, name, sP, lP):
     df_ma['MA_S'] = df_ma['Close'].rolling(window=int(sP)).mean()
     df_ma['MA_L'] = df_ma['Close'].rolling(window=int(lP)).mean()
     
-    # 短均：預設顯示
+    # 短均 (預設顯示)
     fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_S'], name=f'短均({sP}MA)', 
                              line=dict(color='SpringGreen', width=2)), row=1, col=1)
     
-    # 長均：預設隱藏 (點擊圖例標籤才開啟)
+    # 長均 (預設隱藏：點擊圖例才顯示)
     fig.add_trace(go.Scatter(x=df_ma.index, y=df_ma['MA_L'], name=f'長均({lP}MA)', 
                              visible='legendonly', 
                              line=dict(color='Magenta', width=2)), row=1, col=1)
@@ -45,25 +46,28 @@ def draw_kline(df, sid, name, sP, lP):
     colors = ['#FF3333' if row['Close'] >= row['Open'] else '#00AA00' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors), row=2, col=1)
 
-    # 介面與行為設定
+    # 畫面外觀與行為設定
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="black",
         plot_bgcolor="black",
         font=dict(family="Microsoft JhengHei", size=14, color="white"),
         xaxis_rangeslider_visible=False,
-        height=800,
-        dragmode='pan',  # 預設平移模式，滑動不會變成指定區域放大
+        # 【修正】高度調降為 500，讓手機畫面看起來比較「寬」
+        height=500, 
+        # 【修正】預設為平移模式 (不預設劃線、不預設縮放)
+        dragmode='pan', 
         newshape=dict(line_color='White', line_width=2),
-        margin=dict(t=80, b=50, l=10, r=10)
+        margin=dict(t=50, b=50, l=10, r=10)
     )
 
-    # 工具列配置：加入劃線與橡皮擦
+    # 工具列配置：加入橡皮擦
     config = {
         'scrollZoom': True,
         'displayModeBar': True,
         'displaylogo': False,
-        'modeBarButtonsToAdd': ['drawline', 'eraseshape']
+        'modeBarButtonsToAdd': ['drawline', 'eraseshape'], # 確保有劃線和橡皮擦
+        'modeBarButtonsToRemove': ['lasso2d', 'select2d', 'zoom2d'] # 移除誤觸按鈕
     }
     
     st.plotly_chart(fig, use_container_width=True, config=config)
