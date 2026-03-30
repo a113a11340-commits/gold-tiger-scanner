@@ -41,7 +41,7 @@ def run_precise_scan():
                 sign, vol = str(item[4]), str(item[5]) if pd.notnull(item[5]) else ""
                 
                 sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
-                # 修改點 1：抓取天數維持 250 天以利計算長均線，但繪圖時只秀半年
+                # 抓取 250 天以確保長均線計算正確
                 df = yf.download(sid_full, period="250d", progress=False)
                 
                 if not df.empty:
@@ -61,10 +61,10 @@ def run_precise_scan():
 if "first_run" not in st.session_state:
     run_precise_scan()
 
-# --- 3. 繪圖函數 (修改高度、網格、時間範圍) ---
+# --- 3. 繪圖函數 (修改為 1個月資料，其餘維持) ---
 def draw_kline(df, sid, name, sP, lP):
-    # 修改點 1：只取最後 60 筆資料 (約3個月) 進行繪圖
-    plot_df = df.tail(60) 
+    # 修改點：只取最後 20 筆資料 (約 1 個月) 進行繪圖
+    plot_df = df.tail(20) 
     
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -72,9 +72,9 @@ def draw_kline(df, sid, name, sP, lP):
         increasing_line_color='#FF3333', decreasing_line_color='#00AA00', line=dict(width=0.5)
     ))
     
-    # 均線計算需用原始 df (確保 250 天數據充足)，但只畫出最後 60 天
-    ma_s = df['Close'].rolling(window=int(sP)).mean().tail(60)
-    ma_l = df['Close'].rolling(window=int(lP)).mean().tail(60)
+    # 均線只取最後 20 筆顯示在圖上
+    ma_s = df['Close'].rolling(window=int(sP)).mean().tail(20)
+    ma_l = df['Close'].rolling(window=int(lP)).mean().tail(20)
     
     fig.add_trace(go.Scatter(x=plot_df.index, y=ma_s, name='短', line=dict(color='SpringGreen', width=0.5)))
     fig.add_trace(go.Scatter(x=plot_df.index, y=ma_l, name='長', line=dict(color='Magenta', width=0.5)))
@@ -82,11 +82,11 @@ def draw_kline(df, sid, name, sP, lP):
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", 
         plot_bgcolor="rgba(0,0,0,0)",
-        height=150, # 修改點 3：圖高改為 150
+        height=150, # 維持 150 高度
         margin=dict(t=5, b=5, l=0, r=0), 
         xaxis_rangeslider_visible=False, showlegend=False, 
         font=dict(size=8, color="white"), dragmode='pan',
-        # 修改點 2：加入淺灰色網格
+        # 維持淺灰色網格
         xaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.3)', zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.3)', zeroline=False, fixedrange=True)
     )
