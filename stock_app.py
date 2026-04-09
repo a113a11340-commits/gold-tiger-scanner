@@ -41,7 +41,7 @@ def run_scan():
             l_ma = pd.to_numeric(row.iloc[3], errors='coerce')
             vol = row.iloc[6] if pd.notna(row.iloc[6]) else ""
 
-            # 【新增要求】：下載天數改為 8 個月 (240d)
+            # 下載天數改為 8 個月 (240d)
             stock = yf.download(sid_full, period="240d", progress=False)
             
             if not stock.empty:
@@ -112,14 +112,14 @@ if "data" in st.session_state:
                     hovermode=False, dragmode=False, xaxis_rangeslider_visible=False,
                     xaxis=dict(
                         range=[start_dt_show, end_dt], type='category', 
-                        showticklabels=False, fixedrange=True # 隱藏時間
+                        showticklabels=False, fixedrange=True
                     ),
                     yaxis=dict(side='right', tickfont=dict(size=8), fixedrange=True),
                     margin=dict(l=5, r=5, t=5, b=5),
                 )
                 st.plotly_chart(fig1, use_container_width=True, config={'displayModeBar': False})
 
-                # --- 第二張圖：新增的型態偵測圖 (標註小框框) ---
+                # --- 第二張圖：新增的型態偵測圖 ---
                 fig2 = go.Figure()
                 fig2.add_trace(go.Candlestick(
                     x=item['df'].index, 
@@ -130,16 +130,18 @@ if "data" in st.session_state:
                     hoverinfo='none'
                 ))
 
-                # 簡單型態標註邏輯 (在圖面上畫出小框框)
-                recent_data = item['df'].last('60D')
-                high_val = recent_data['High'].max()
-                high_idx = recent_data['High'].idxmax()
+                # --- 修正出錯的地方：改用切片抓取最近 60 天數據 ---
+                cutoff_date = end_dt - pd.Timedelta(days=60)
+                recent_data = item['df'].loc[item['df'].index >= cutoff_date]
                 
-                # 增加偵測框框 (範例標註)
-                fig2.add_shape(
-                    type="rect", x0=high_idx, x1=end_dt, y0=high_val*0.98, y1=high_val*1.02,
-                    line=dict(color="Yellow", width=1), fillcolor="Yellow", opacity=0.2
-                )
+                if not recent_data.empty:
+                    high_val = recent_data['High'].max()
+                    high_idx = recent_data['High'].idxmax()
+                    
+                    fig2.add_shape(
+                        type="rect", x0=high_idx, x1=end_dt, y0=high_val*0.98, y1=high_val*1.02,
+                        line=dict(color="Yellow", width=1), fillcolor="Yellow", opacity=0.2
+                    )
 
                 fig2.update_layout(
                     height=120, showlegend=False, template="plotly_dark",
@@ -153,7 +155,7 @@ if "data" in st.session_state:
                 )
                 st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
 
-                # --- 新增：實戰操作建議 ---
+                # --- 實戰操作建議 ---
                 st.markdown("""
                 **🐯 金虎南型態實戰操作建議**
                 *   **型態確認**：觀察下方偵測圖。若黃框出現在高檔且 K 線無法突破框頂，可能形成「雙頂」或「頭肩頂」，多單應警戒。
