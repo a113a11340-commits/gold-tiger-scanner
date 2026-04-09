@@ -41,7 +41,7 @@ def run_scan():
             l_ma = pd.to_numeric(row.iloc[3], errors='coerce')
             vol = row.iloc[6] if pd.notna(row.iloc[6]) else ""
 
-            # 【修改】：下載天數改為 8個月 (240d)
+            # 【新增要求】：下載天數改為 8 個月 (240d)
             stock = yf.download(sid_full, period="240d", progress=False)
             
             if not stock.empty:
@@ -83,10 +83,13 @@ if "data" in st.session_state:
             title_text = f"{item['sid']} {item['name']} ({item['price']}) ➔ {item['sign']} [{item['vol']}]"
             
             with st.expander(title_text, expanded=True):
-                fig = go.Figure()
-                
-                # 【修改】：上漲變紅，下跌變綠
-                fig.add_trace(go.Candlestick(
+                # 設定顯示範圍為最近 2 個月
+                end_dt = item['df'].index[-1]
+                start_dt_show = end_dt - pd.DateOffset(months=2)
+
+                # --- 第一張圖：原有的 K 線與均線圖 ---
+                fig1 = go.Figure()
+                fig1.add_trace(go.Candlestick(
                     x=item['df'].index, 
                     open=item['df']['Open'], high=item['df']['High'], 
                     low=item['df']['Low'], close=item['df']['Close'],
@@ -98,39 +101,62 @@ if "data" in st.session_state:
                 close_prices = item['df']['Close']
                 if pd.notna(item['s_ma']):
                     ma_s = close_prices.rolling(window=int(item['s_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=item['df'].index, y=ma_s, line=dict(color='SpringGreen', width=1), hoverinfo='none'))
+                    fig1.add_trace(go.Scatter(x=item['df'].index, y=ma_s, line=dict(color='SpringGreen', width=1), hoverinfo='none'))
                 
                 if pd.notna(item['l_ma']):
                     ma_l = close_prices.rolling(window=int(item['l_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=item['df'].index, y=ma_l, line=dict(color='Magenta', width=1), hoverinfo='none'))
-                
-                end_dt = item['df'].index[-1]
-                start_dt = end_dt - pd.DateOffset(months=1)
+                    fig1.add_trace(go.Scatter(x=item['df'].index, y=ma_l, line=dict(color='Magenta', width=1), hoverinfo='none'))
 
-                fig.update_layout(
-                    height=150,
-                    showlegend=False,
-                    template="plotly_dark",
-                    hovermode=False,
-                    dragmode=False,
-                    xaxis_rangeslider_visible=False,
+                fig1.update_layout(
+                    height=150, showlegend=False, template="plotly_dark",
+                    hovermode=False, dragmode=False, xaxis_rangeslider_visible=False,
                     xaxis=dict(
-                        range=[start_dt, end_dt],
-                        # 【修改】：排除假日空格 (type='category')
-                        type='category',
-                        tickfont=dict(size=8),
-                        fixedrange=True 
+                        range=[start_dt_show, end_dt], type='category', 
+                        showticklabels=False, fixedrange=True # 隱藏時間
                     ),
-                    yaxis=dict(
-                        side='right', 
-                        tickfont=dict(size=8),
-                        showgrid=True, gridcolor='rgba(128,128,128,0.1)',
-                        fixedrange=True 
-                    ),
+                    yaxis=dict(side='right', tickfont=dict(size=8), fixedrange=True),
                     margin=dict(l=5, r=5, t=5, b=5),
                 )
+                st.plotly_chart(fig1, use_container_width=True, config={'displayModeBar': False})
+
+                # --- 第二張圖：新增的型態偵測圖 (標註小框框) ---
+                fig2 = go.Figure()
+                fig2.add_trace(go.Candlestick(
+                    x=item['df'].index, 
+                    open=item['df']['Open'], high=item['df']['High'], 
+                    low=item['df']['Low'], close=item['df']['Close'],
+                    increasing_line_color='red', increasing_fillcolor='red',
+                    decreasing_line_color='green', decreasing_fillcolor='green',
+                    hoverinfo='none'
+                ))
+
+                # 簡單型態標註邏輯 (在圖面上畫出小框框)
+                recent_data = item['df'].last('60D')
+                high_val = recent_data['High'].max()
+                high_idx = recent_data['High'].idxmax()
                 
-                st.plotly_chart(fig, use_container_width=True, config={
-                    'displayModeBar': False, 
-                    'scrollZoom': False
-                })
+                # 增加偵測框框 (範例標註)
+                fig2.add_shape(
+                    type="rect", x0=high_idx, x1=end_dt, y0=high_val*0.98, y1=high_val*1.02,
+                    line=dict(color="Yellow", width=1), fillcolor="Yellow", opacity=0.2
+                )
+
+                fig2.update_layout(
+                    height=120, showlegend=False, template="plotly_dark",
+                    hovermode=False, dragmode=False, xaxis_rangeslider_visible=False,
+                    xaxis=dict(
+                        range=[start_dt_show, end_dt], type='category', 
+                        showticklabels=False, fixedrange=True
+                    ),
+                    yaxis=dict(side='right', tickfont=dict(size=8), fixedrange=True, showgrid=False),
+                    margin=dict(l=5, r=5, t=5, b=20),
+                )
+                st.plotly_chart(fig2, use_container_width=True, config={'displayModeBar': False})
+
+                # --- 新增：實戰操作建議 ---
+                st.markdown("""
+                **🐯 金虎南型態實戰操作建議**
+                *   **型態確認**：觀察下方偵測圖。若黃框出現在高檔且 K 線無法突破框頂，可能形成「雙頂」或「頭肩頂」，多單應警戒。
+                *   **進場策略**：若出現「上升三角形」或「旗形整理」，應等價格明確站上框框上緣壓力位後再行介入。
+                *   **止損關鍵**：所有交易應以框框下緣作為參考，一旦收盤跌破框位，代表型態失敗，應果斷執行停損。
+                """)
