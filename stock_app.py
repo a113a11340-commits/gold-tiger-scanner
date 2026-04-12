@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-細線完整顯示版")
+st.set_page_config(layout="wide", page_title="金虎南-靜態專業配色版")
 
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
@@ -74,7 +74,7 @@ def run_scan():
     return results
 
 if "data" not in st.session_state:
-    with st.spinner('掃描中...'):
+    with st.spinner('圖表生成中...'):
         st.session_state["data"] = run_scan()
 
 if "data" in st.session_state:
@@ -93,8 +93,6 @@ if "data" in st.session_state:
         for item in data_list:
             df = item['df']
             total_len = len(df)
-            # 視野鎖定 42 根
-            display_start = max(0, total_len - 42)
             end_dt = df.index[-1]
             
             title_text = f"{item['sid']} {item['name']} ({item['price']}) ➔ {item['sign']}"
@@ -102,32 +100,32 @@ if "data" in st.session_state:
             with st.expander(title_text, expanded=True):
                 fig = go.Figure()
                 
-                # 1. K線圖 (細線處理)
+                # 1. K線圖 (細線)
                 fig.add_trace(go.Candlestick(
                     x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-                    increasing_line_color='#FF3B30', increasing_fillcolor='#FF3B30',
-                    decreasing_line_color='#28CD41', decreasing_fillcolor='#28CD41',
-                    line=dict(width=0.8) # 強制細線
+                    increasing_line_color='#E63946', increasing_fillcolor='#E63946',
+                    decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F',
+                    line=dict(width=0.8)
                 ))
                 
                 # 2. 短均線 (深藍細線)
                 if pd.notna(item['s_ma']):
                     ma_s = df['Close'].rolling(window=int(item['s_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='#007AFF', width=1)))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='#0055CC', width=1)))
 
                 # 3. 長均線 (灰細虛線)
                 if pd.notna(item['l_ma']):
                     ma_l = df['Close'].rolling(window=int(item['l_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='#A0A0A0', width=0.8, dash='dot')))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='#888888', width=0.8, dash='dot')))
 
-                # 4. 小框框 (亮紅細框)
+                # 4. 箱型顏色修正：淡灰色填充 + 深灰色細邊框
                 if item['box']:
                     box = item['box']
                     fig.add_shape(type="rect",
                                   x0=box['start_date'], x1=end_dt,
                                   y0=box['low'], y1=box['high'],
-                                  line=dict(color="#FF4500", width=0.8),
-                                  fillcolor="#FF4500", opacity=0.2)
+                                  line=dict(color="#555555", width=0.8), # 深灰邊框
+                                  fillcolor="#CCCCCC", opacity=0.25) # 淡灰填充
 
                 fig.update_layout(
                     height=300, showlegend=False, 
@@ -136,7 +134,6 @@ if "data" in st.session_state:
                     margin=dict(l=10, r=10, t=10, b=10),
                     xaxis=dict(
                         type='category',
-                        # 關鍵修正：末端給予 0.5 的空間，確保最後一根 K 線完整顯示
                         range=[total_len - 42, total_len - 0.5], 
                         showticklabels=False,
                         fixedrange=True,
@@ -145,7 +142,13 @@ if "data" in st.session_state:
                     yaxis=dict(
                         side='right', 
                         tickfont=dict(size=10), 
-                        gridcolor='#F2F2F2'
-                    )
+                        gridcolor='#F2F2F2',
+                        fixedrange=True
+                    ),
+                    hovermode=False
                 )
-                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                
+                st.plotly_chart(fig, use_container_width=True, config={
+                    'staticPlot': True, 
+                    'displayModeBar': False
+                })
