@@ -6,13 +6,13 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南手機版-小框框定錨版")
+st.set_page_config(layout="wide", page_title="金虎南手機版-亮眼框框版")
 
 # Google Sheet 網址
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
 def run_scan():
-    """讀取邏輯"""
+    """穩定讀取邏輯"""
     csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv&gid=0'
     try:
         res = requests.get(csv_url, timeout=15, stream=True)
@@ -41,18 +41,16 @@ def run_scan():
                 if isinstance(stock.columns, pd.MultiIndex):
                     stock.columns = stock.columns.get_level_values(0)
                 
-                # --- 小框框偵測邏輯 (僅限短均線 s_ma) ---
+                # --- 小框框偵測邏輯 ---
                 ma_val = int(s_ma) if pd.notna(s_ma) else 20
                 stock['MA_S'] = stock['Close'].rolling(window=ma_val).mean()
                 
                 box_data = None
                 recent_3 = stock.tail(3)
                 if len(recent_3) == 3 and not recent_3['MA_S'].isna().any():
-                    # 檢查最近 3 天是否全部觸碰「短均線」
                     is_3_day_valid = ((recent_3['High'] >= recent_3['MA_S']) & (recent_3['Low'] <= recent_3['MA_S'])).all()
                     
                     if is_3_day_valid:
-                        # 成立後回溯定錨
                         temp_idx = len(stock) - 3
                         while temp_idx > 0:
                             prev_row = stock.iloc[temp_idx - 1]
@@ -64,8 +62,8 @@ def run_scan():
                         box_df = stock.iloc[temp_idx:]
                         box_data = {
                             "start_date": box_df.index[0],
-                            "high": float(box_df['Close'].max()), # 框框上緣
-                            "low": float(box_df['Close'].min()),  # 框框下緣
+                            "high": float(box_df['Close'].max()),
+                            "low": float(box_df['Close'].min()),
                             "days": len(box_df)
                         }
 
@@ -80,7 +78,7 @@ def run_scan():
 
 # --- 2. 執行與快取 ---
 if "data" not in st.session_state:
-    with st.spinner('型態掃描中...'):
+    with st.spinner('計算型態中...'):
         st.session_state["data"] = run_scan()
 
 # --- 3. 畫面顯示 ---
@@ -88,7 +86,7 @@ if "data" in st.session_state:
     data_list = st.session_state["data"]
     
     col_t, col_b = st.columns([7, 3])
-    with col_t: st.subheader("🐯 金虎南型態訊號")
+    with col_t: st.subheader("🐯 金虎南訊號")
     with col_b:
         if st.button("🔄 更新"):
             del st.session_state["data"]
@@ -99,7 +97,7 @@ if "data" in st.session_state:
     else:
         for item in data_list:
             df = item['df']
-            display_df = df.iloc[-42:] # 最近 2 個月
+            display_df = df.iloc[-21:] # 顯示 1 個月
             start_idx = display_df.index[0]
             end_idx = display_df.index[-1]
             
@@ -115,33 +113,33 @@ if "data" in st.session_state:
                     decreasing_line_color='green', decreasing_fillcolor='green'
                 ))
                 
-                # 2. 短均線 (黃線)
+                # 2. 短均線 (保持黃色)
                 if pd.notna(item['s_ma']):
                     ma_s = df['Close'].rolling(window=int(item['s_ma'])).mean()
                     fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='yellow', width=1.5)))
 
-                # 3. 長均線 (紫線，僅參考)
+                # 3. 長均線 (保持紫線)
                 if pd.notna(item['l_ma']):
                     ma_l = df['Close'].rolling(window=int(item['l_ma'])).mean()
                     fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='Magenta', width=1, dash='dot')))
 
-                # 4. 畫小框框 (黃色半透明)
+                # 4. 畫小框框 (換成青藍色 Cyan)
                 if item['box']:
                     box = item['box']
-                    line_start = max(start_idx, box['start_date'])
+                    box_start = max(start_idx, box['start_date'])
                     fig.add_shape(type="rect",
-                                  x0=line_start, x1=end_idx,
+                                  x0=box_start, x1=end_idx,
                                   y0=box['low'], y1=box['high'],
-                                  line=dict(color="yellow", width=1),
-                                  fillcolor="yellow", opacity=0.2)
+                                  line=dict(color="Cyan", width=2), # 線條加粗一點點
+                                  fillcolor="Cyan", opacity=0.3) # 稍微提高透明度
 
                 fig.update_layout(
-                    height=250, showlegend=False, template="plotly_dark",
-                    xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=10, b=10),
-                    xaxis=dict(range=[start_idx, end_idx], type='category', showticklabels=True, tickfont=dict(size=8)),
+                    height=220, showlegend=False, template="plotly_dark",
+                    xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=10, b=5),
+                    xaxis=dict(range=[start_idx, end_idx], type='category', showticklabels=False),
                     yaxis=dict(side='right', tickfont=dict(size=9))
                 )
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
                 if item['box']:
-                    st.caption(f"🔔 小箱型成立：區間已延續 {item['box']['days']} 天")
+                    st.caption(f"💎 小箱型：區間持續 {item['box']['days']} 天")
