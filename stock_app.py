@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南手機版-亮眼框框版")
+st.set_page_config(layout="wide", page_title="金虎南手機版-2個月精準框")
 
 # Google Sheet 網址
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
@@ -41,7 +41,7 @@ def run_scan():
                 if isinstance(stock.columns, pd.MultiIndex):
                     stock.columns = stock.columns.get_level_values(0)
                 
-                # --- 小框框偵測邏輯 ---
+                # --- 小框框偵測邏輯 (僅限短均線 s_ma) ---
                 ma_val = int(s_ma) if pd.notna(s_ma) else 20
                 stock['MA_S'] = stock['Close'].rolling(window=ma_val).mean()
                 
@@ -97,7 +97,8 @@ if "data" in st.session_state:
     else:
         for item in data_list:
             df = item['df']
-            display_df = df.iloc[-21:] # 顯示 1 個月
+            # --- 關鍵修正：顯示 42 根 K 線 (2 個月) ---
+            display_df = df.iloc[-42:] 
             start_idx = display_df.index[0]
             end_idx = display_df.index[-1]
             
@@ -113,29 +114,30 @@ if "data" in st.session_state:
                     decreasing_line_color='green', decreasing_fillcolor='green'
                 ))
                 
-                # 2. 短均線 (保持黃色)
+                # 2. 短均線 (黃)
                 if pd.notna(item['s_ma']):
                     ma_s = df['Close'].rolling(window=int(item['s_ma'])).mean()
                     fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='yellow', width=1.5)))
 
-                # 3. 長均線 (保持紫線)
+                # 3. 長均線 (紫虛線)
                 if pd.notna(item['l_ma']):
                     ma_l = df['Close'].rolling(window=int(item['l_ma'])).mean()
                     fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='Magenta', width=1, dash='dot')))
 
-                # 4. 畫小框框 (換成青藍色 Cyan)
+                # 4. 畫小框框 (亮眼青藍色 Cyan)
                 if item['box']:
                     box = item['box']
                     box_start = max(start_idx, box['start_date'])
                     fig.add_shape(type="rect",
                                   x0=box_start, x1=end_idx,
                                   y0=box['low'], y1=box['high'],
-                                  line=dict(color="Cyan", width=2), # 線條加粗一點點
-                                  fillcolor="Cyan", opacity=0.3) # 稍微提高透明度
+                                  line=dict(color="Cyan", width=2),
+                                  fillcolor="Cyan", opacity=0.3)
 
                 fig.update_layout(
                     height=220, showlegend=False, template="plotly_dark",
                     xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=10, b=5),
+                    # --- X 軸設定：隱藏日期標籤 ---
                     xaxis=dict(range=[start_idx, end_idx], type='category', showticklabels=False),
                     yaxis=dict(side='right', tickfont=dict(size=9))
                 )
