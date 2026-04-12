@@ -6,13 +6,11 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南手機版-2個月精準框")
+st.set_page_config(layout="wide", page_title="金虎南-強制2個月鎖定版")
 
-# Google Sheet 網址
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
 def run_scan():
-    """穩定讀取邏輯"""
     csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv&gid=0'
     try:
         res = requests.get(csv_url, timeout=15, stream=True)
@@ -41,7 +39,6 @@ def run_scan():
                 if isinstance(stock.columns, pd.MultiIndex):
                     stock.columns = stock.columns.get_level_values(0)
                 
-                # --- 小框框偵測邏輯 (僅限短均線 s_ma) ---
                 ma_val = int(s_ma) if pd.notna(s_ma) else 20
                 stock['MA_S'] = stock['Close'].rolling(window=ma_val).mean()
                 
@@ -76,12 +73,10 @@ def run_scan():
         except Exception: continue
     return results
 
-# --- 2. 執行與快取 ---
 if "data" not in st.session_state:
-    with st.spinner('計算型態中...'):
+    with st.spinner('掃描中...'):
         st.session_state["data"] = run_scan()
 
-# --- 3. 畫面顯示 ---
 if "data" in st.session_state:
     data_list = st.session_state["data"]
     
@@ -97,51 +92,56 @@ if "data" in st.session_state:
     else:
         for item in data_list:
             df = item['df']
-            # --- 關鍵修正：顯示 42 根 K 線 (2 個月) ---
-            display_df = df.iloc[-42:] 
-            start_idx = display_df.index[0]
-            end_idx = display_df.index[-1]
+            
+            # --- 強制計算 42 根的日期範圍 ---
+            display_df = df.tail(42) 
+            start_dt = display_df.index[0]
+            end_dt = display_df.index[-1]
             
             title_text = f"{item['sid']} {item['name']} ({item['price']}) ➔ {item['sign']}"
             
             with st.expander(title_text, expanded=True):
                 fig = go.Figure()
                 
-                # 1. K線圖
+                # K線
                 fig.add_trace(go.Candlestick(
                     x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                     increasing_line_color='red', increasing_fillcolor='red',
                     decreasing_line_color='green', decreasing_fillcolor='green'
                 ))
                 
-                # 2. 短均線 (黃)
+                # 短均 (黃)
                 if pd.notna(item['s_ma']):
                     ma_s = df['Close'].rolling(window=int(item['s_ma'])).mean()
                     fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='yellow', width=1.5)))
 
-                # 3. 長均線 (紫虛線)
+                # 長均 (紫虛線)
                 if pd.notna(item['l_ma']):
                     ma_l = df['Close'].rolling(window=int(item['l_ma'])).mean()
                     fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='Magenta', width=1, dash='dot')))
 
-                # 4. 畫小框框 (亮眼青藍色 Cyan)
+                # 青藍色小框框
                 if item['box']:
                     box = item['box']
-                    box_start = max(start_idx, box['start_date'])
                     fig.add_shape(type="rect",
-                                  x0=box_start, x1=end_idx,
+                                  x0=box['start_date'], x1=end_dt,
                                   y0=box['low'], y1=box['high'],
                                   line=dict(color="Cyan", width=2),
-                                  fillcolor="Cyan", opacity=0.3)
+                                  fillcolor="Cyan", opacity=0.35)
 
                 fig.update_layout(
-                    height=220, showlegend=False, template="plotly_dark",
+                    height=280, showlegend=False, template="plotly_dark",
                     xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=10, b=5),
-                    # --- X 軸設定：隱藏日期標籤 ---
-                    xaxis=dict(range=[start_idx, end_idx], type='category', showticklabels=False),
-                    yaxis=dict(side='right', tickfont=dict(size=9))
+                    # --- X軸：日期類型 + 強制視野範圍 ---
+                    xaxis=dict(
+                        type='date',
+                        range=[start_dt, end_dt],
+                        showticklabels=False,
+                        fixedrange=True
+                    ),
+                    yaxis=dict(side='right', tickfont=dict(size=10))
                 )
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
                 if item['box']:
-                    st.caption(f"💎 小箱型：區間持續 {item['box']['days']} 天")
+                    st.caption(f"💎 小箱型成立：區間持續 {item['box']['days']} 天")
