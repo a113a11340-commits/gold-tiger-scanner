@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-強制2個月鎖定版")
+st.set_page_config(layout="wide", page_title="金虎南-白色背景高對比鎖定版")
 
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
@@ -73,15 +73,17 @@ def run_scan():
         except Exception: continue
     return results
 
+# --- 2. 執行與快取 ---
 if "data" not in st.session_state:
-    with st.spinner('掃描中...'):
+    with st.spinner('白色背景高對比型態掃描中...'):
         st.session_state["data"] = run_scan()
 
+# --- 3. 畫面顯示 ---
 if "data" in st.session_state:
     data_list = st.session_state["data"]
     
     col_t, col_b = st.columns([7, 3])
-    with col_t: st.subheader("🐯 金虎南訊號")
+    with col_t: st.subheader("🐯 金虎南型態訊號")
     with col_b:
         if st.button("🔄 更新"):
             del st.session_state["data"]
@@ -93,9 +95,10 @@ if "data" in st.session_state:
         for item in data_list:
             df = item['df']
             
-            # --- 強制計算 42 根的日期範圍 ---
-            display_df = df.tail(42) 
-            start_dt = display_df.index[0]
+            # --- 鎖定最後 42 根交易日 ---
+            total_len = len(df)
+            display_start = max(0, total_len - 42)
+            display_df = df.iloc[display_start:]
             end_dt = display_df.index[-1]
             
             title_text = f"{item['sid']} {item['name']} ({item['price']}) ➔ {item['sign']}"
@@ -103,45 +106,53 @@ if "data" in st.session_state:
             with st.expander(title_text, expanded=True):
                 fig = go.Figure()
                 
-                # K線
+                # 1. K 線圖 (白色背景專用紅綠色對比)
                 fig.add_trace(go.Candlestick(
                     x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-                    increasing_line_color='red', increasing_fillcolor='red',
-                    decreasing_line_color='green', decreasing_fillcolor='green'
+                    increasing_line_color='#E63946', increasing_fillcolor='#E63946', # 白色背景亮紅色
+                    decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F', # 白色背景青綠色
+                    decreasing_line_width=1, increasing_line_width=1
                 ))
                 
-                # 短均 (黃)
+                # 2. 短均線 (白色背景更換為純藍色 Pure Blue，對比最強)
                 if pd.notna(item['s_ma']):
                     ma_s = df['Close'].rolling(window=int(item['s_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='yellow', width=1.5)))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='#0055CC', width=2.5))) # 藍色加粗
 
-                # 長均 (紫虛線)
+                # 3. 長均線 (深灰色 Dark Gray 虛線參考)
                 if pd.notna(item['l_ma']):
                     ma_l = df['Close'].rolling(window=int(item['l_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='Magenta', width=1, dash='dot')))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='#666666', width=1.5, dash='dot')))
 
-                # 青藍色小框框
+                # 4. 小框框 (換成亮紅色邊框 Orange Red，對比白底最鮮明)
                 if item['box']:
                     box = item['box']
                     fig.add_shape(type="rect",
                                   x0=box['start_date'], x1=end_dt,
                                   y0=box['low'], y1=box['high'],
-                                  line=dict(color="Cyan", width=2),
-                                  fillcolor="Cyan", opacity=0.35)
+                                  line=dict(color="#FF4500", width=2.5), # 亮紅色粗邊框
+                                  fillcolor="#FF4500", opacity=0.3)
 
                 fig.update_layout(
-                    height=280, showlegend=False, template="plotly_dark",
-                    xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=10, b=5),
-                    # --- X軸：日期類型 + 強制視野範圍 ---
+                    height=300, showlegend=False, 
+                    template="plotly_white", # --- 關鍵修正：切換為白色主題 ---
+                    xaxis_rangeslider_visible=False, 
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    # --- X軸設定：類別型態，定錨最後 42 根，排除假日空白 ---
                     xaxis=dict(
-                        type='date',
-                        range=[start_dt, end_dt],
+                        type='category',
+                        range=[total_len - 42, total_len - 1],
                         showticklabels=False,
-                        fixedrange=True
+                        fixedrange=True,
+                        gridcolor='#E0E0E0'
                     ),
-                    yaxis=dict(side='right', tickfont=dict(size=10))
+                    yaxis=dict(
+                        side='right', 
+                        tickfont=dict(size=11, color='#333333'), 
+                        gridcolor='#E0E0E0'
+                    )
                 )
                 st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
                 if item['box']:
-                    st.caption(f"💎 小箱型成立：區間持續 {item['box']['days']} 天")
+                    st.write(f"🔥 **小箱型糾結**：已蓄勢 **{item['box']['days']}** 天")
