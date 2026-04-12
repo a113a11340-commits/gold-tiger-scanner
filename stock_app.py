@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-靜態專業配色版")
+st.set_page_config(layout="wide", page_title="金虎南-靜態黑白專業版")
 
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
@@ -74,21 +74,21 @@ def run_scan():
     return results
 
 if "data" not in st.session_state:
-    with st.spinner('圖表生成中...'):
+    with st.spinner('掃描中...'):
         st.session_state["data"] = run_scan()
 
 if "data" in st.session_state:
     data_list = st.session_state["data"]
     
     col_t, col_b = st.columns([7, 3])
-    with col_t: st.subheader("🐯 金虎南訊號")
+    with col_t: st.subheader("🐯 金虎南型態訊號")
     with col_b:
         if st.button("🔄 刷新"):
             del st.session_state["data"]
             st.rerun()
 
     if not data_list:
-        st.write("目前無訊號")
+        st.write("目前無符合條件之股票")
     else:
         for item in data_list:
             df = item['df']
@@ -100,7 +100,7 @@ if "data" in st.session_state:
             with st.expander(title_text, expanded=True):
                 fig = go.Figure()
                 
-                # 1. K線圖 (細線)
+                # 1. K線圖 (細線，白色背景)
                 fig.add_trace(go.Candlestick(
                     x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                     increasing_line_color='#E63946', increasing_fillcolor='#E63946',
@@ -111,32 +111,33 @@ if "data" in st.session_state:
                 # 2. 短均線 (深藍細線)
                 if pd.notna(item['s_ma']):
                     ma_s = df['Close'].rolling(window=int(item['s_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='#0055CC', width=1)))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_s, line=dict(color='#0055CC', width=1), hoverinfo='skip'))
 
-                # 3. 長均線 (灰細虛線)
+                # 3. 長均線 (灰色虛線)
                 if pd.notna(item['l_ma']):
                     ma_l = df['Close'].rolling(window=int(item['l_ma'])).mean()
-                    fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='#888888', width=0.8, dash='dot')))
+                    fig.add_trace(go.Scatter(x=df.index, y=ma_l, line=dict(color='#888888', width=0.8, dash='dot'), hoverinfo='skip'))
 
-                # 4. 箱型顏色修正：淡灰色填充 + 深灰色細邊框
+                # 4. 箱型顏色修正：深黑色邊框 + 深黑色填充 (適度透明度)
                 if item['box']:
                     box = item['box']
                     fig.add_shape(type="rect",
                                   x0=box['start_date'], x1=end_dt,
                                   y0=box['low'], y1=box['high'],
-                                  line=dict(color="#555555", width=0.8), # 深灰邊框
-                                  fillcolor="#CCCCCC", opacity=0.25) # 淡灰填充
+                                  line=dict(color="#000000", width=0.8), # 純黑邊框
+                                  fillcolor="#000000", opacity=0.25) # 深黑填充，透明度25%
 
                 fig.update_layout(
                     height=300, showlegend=False, 
-                    template="plotly_white",
+                    template="plotly_white", # 白色背景
                     xaxis_rangeslider_visible=False, 
                     margin=dict(l=10, r=10, t=10, b=10),
+                    # --- 靜態細線設定 ---
                     xaxis=dict(
                         type='category',
                         range=[total_len - 42, total_len - 0.5], 
                         showticklabels=False,
-                        fixedrange=True,
+                        fixedrange=True, # 禁用互動
                         gridcolor='#F2F2F2'
                     ),
                     yaxis=dict(
@@ -145,10 +146,11 @@ if "data" in st.session_state:
                         gridcolor='#F2F2F2',
                         fixedrange=True
                     ),
-                    hovermode=False
+                    hovermode=False # 關閉懸停資訊
                 )
                 
+                # --- 強制靜態圖，移除所有互動按鈕 ---
                 st.plotly_chart(fig, use_container_width=True, config={
-                    'staticPlot': True, 
+                    'staticPlot': True, # 徹底轉為靜態圖片模式
                     'displayModeBar': False
                 })
