@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-極簡專業版")
+st.set_page_config(layout="wide", page_title="金虎南-訊號過濾版")
 
 # 使用你提供的試算表連結
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
@@ -27,7 +27,12 @@ def run_scan():
     results = []
     for i, row in raw_df.iterrows():
         try:
+            # A. 檢查第一欄是否有代號
             if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
+            
+            # B. 核心：檢查 F 欄位是否為空，沒寫字就跳過不顯示
+            sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+            if sign == "": continue 
             
             sid_raw = str(row.iloc[0]).split('.')[0].strip()
             sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
@@ -36,9 +41,8 @@ def run_scan():
             # 均線參數
             s_ma_param = pd.to_numeric(row.iloc[2], errors='coerce') 
             l_ma_param = pd.to_numeric(row.iloc[3], errors='coerce')
-            sign = str(row.iloc[5]) if len(row) > 5 and pd.notna(row.iloc[5]) else ""
 
-            # 下載數據 (下載 120 天確保均線計算正確)
+            # 下載數據 (2個月視野約需 60 天以上數據以計算均線)
             stock = yf.download(sid_full, period="120d", progress=False)
             
             if not stock.empty:
@@ -83,20 +87,20 @@ def run_scan():
 
 # --- 2. 顯示邏輯 ---
 if "data" not in st.session_state:
-    with st.spinner('圖表載入中...'):
+    with st.spinner('掃描訊號中...'):
         st.session_state["data"] = run_scan()
 
 data_list = st.session_state.get("data", [])
 
 col_t, col_b = st.columns([8, 2])
-with col_t: st.title("🐯 金虎南-專業版")
+with col_t: st.title("🐯 金虎南-訊號監控")
 with col_b:
     if st.button("🔄 刷新"):
         del st.session_state["data"]
         st.rerun()
 
 if not data_list:
-    st.write("目前清單無資料。")
+    st.info("目前試算表 F 欄位無標註訊號，暫無顯示內容。")
 else:
     for item in data_list:
         df = item['df']
@@ -111,14 +115,14 @@ else:
                 x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                 increasing_line_color='#E63946', increasing_fillcolor='#E63946',
                 decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F',
-                line=dict(width=1) # 2個月視野下 K 棒稍寬
+                line=dict(width=1.2)
             ))
             
-            # 均線 (短均加深藍，長均灰色虛線)
+            # 均線
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), hoverinfo='skip'))
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), hoverinfo='skip'))
 
-            # 箱型 (黑色透明填充)
+            # 箱型
             if item['box']:
                 b = item['box']
                 fig.add_shape(type="rect", x0=b['start_date'], x1=df.index[-1], y0=b['low'], y1=b['high'],
@@ -128,7 +132,7 @@ else:
                 height=380, showlegend=False, template="plotly_white",
                 xaxis_rangeslider_visible=False,
                 margin=dict(l=5, r=5, t=5, b=5),
-                # --- 設定為 2 個月 (42天) 視野 ---
+                # 固定顯示 2 個月 (42天交易日)
                 xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
                 yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
                 hovermode=False
