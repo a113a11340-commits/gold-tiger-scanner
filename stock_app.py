@@ -5,109 +5,160 @@ import yfinance as yf
 import requests
 import io
 
-# --- 1. 設定與資料讀取 ---
-st.set_page_config(layout="wide", page_title="技術分析監控")
+# --- 1. 網頁基本設定 ---
+st.set_page_config(layout="wide", page_title="金虎南-靜態黑白專業版")
 
-# 試算表連結
-MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-SHEET_GIDS = ["0"] # 根據你的連結設定 gid=0
+# 更新為你提供的試算表連結
+MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
 def run_scan():
-    all_results = []
-    for gid in SHEET_GIDS:
-        csv_url = f"{MY_SHEET_URL}/export?format=csv&gid={gid}"
+    csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv&gid=0'
+    try:
+        res = requests.get(csv_url, timeout=15, stream=True)
+        res.encoding = 'utf-8'
+        if res.status_code != 200: return []
+    except Exception: return []
+
+    raw_df = pd.read_csv(io.StringIO(res.text))
+    results = []
+
+    for i, row in raw_df.iterrows():
         try:
-            res = requests.get(csv_url, timeout=15)
-            res.encoding = 'utf-8'
-            if res.status_code != 200: continue
-            raw_df = pd.read_csv(io.StringIO(res.text))
-        except Exception: continue
+            # 檢查代號是否存在
+            if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
+            # 讀取 F 欄位訊號
+            sign = row.iloc[5] if pd.notna(row.iloc[5]) else ""
+            if str(sign).strip() == "": continue 
 
-        for i, row in raw_df.iterrows():
-            try:
-                # 檢查第一欄是否有代號
-                if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
-                
-                # 讀取參數
-                sid_raw = str(row.iloc[0]).split('.')[0].strip()
-                sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
-                name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
-                ma_p = pd.to_numeric(row.iloc[2], errors='coerce') # 短均線參數
-                f_signal = str(row.iloc[5]) if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+            sid_raw = str(row.iloc[0]).split('.')[0].strip()
+            sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
+            name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
+            s_ma_param = pd.to_numeric(row.iloc[2], errors='coerce') 
+            l_ma_param = pd.to_numeric(row.iloc[3], errors='coerce')
 
-                # 下載數據
-                stock = yf.download(sid_full, period="240d", progress=False)
-                if stock.empty: continue
-                if isinstance(stock.columns, pd.MultiIndex): stock.columns = stock.columns.get_level_values(0)
+            # 下載數據 (下載240天以計算長均線，但顯示120天)
+            stock = yf.download(sid_full, period="240d", progress=False)
+            
+            if not stock.empty:
+                if isinstance(stock.columns, pd.MultiIndex):
+                    stock.columns = stock.columns.get_level_values(0)
                 
-                # 計算均線
-                stock['MA_S'] = stock['Close'].rolling(window=int(ma_p)).mean()
-                stock['MA_L'] = stock['Close'].rolling(window=60).mean() # 固定長均線 60
+                # 計算短均與長均
+                s_ma_val = int(s_ma_param) if pd.notna(s_ma_param) else 20
+                l_ma_val = int(l_ma_param) if pd.notna(l_ma_param) else 60
+                stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
+                stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
                 
-                # 掃描 2 個月內的箱型 (供目測用)
-                view_df = stock.tail(42)
-                boxes = []
-                idx = 0
-                while idx < len(view_df) - 2:
-                    w = view_df.iloc[idx:idx+3]
-                    w_max, w_min = w['High'].max(), w['Low'].min()
-                    if (w_max - w_min) / w_min <= 0.03:
-                        start_i = idx
-                        while idx < len(view_df) - 1:
-                            nr = view_df.iloc[idx+1]
-                            if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
-                                idx += 1
+                # 箱型邏輯判定 (維持你提供的邏輯)
+                box_data = None
+                recent_3 = stock.tail(3)
+                if len(recent_3) == 3 and not recent_3['MA_S'].isna().any():
+                    is_3_day_valid = ((recent_3['High'] >= recent_3['MA_S']) & (recent_3['Low'] <= recent_3['MA_S'])).all()
+                    
+                    if is_3_day_valid:
+                        temp_idx = len(stock) - 3
+                        while temp_idx > 0:
+                            prev_row = stock.iloc[temp_idx - 1]
+                            if prev_row['High'] >= prev_row['MA_S'] and prev_row['Low'] <= prev_row['MA_S']:
+                                temp_idx -= 1
                             else:
                                 break
-                        boxes.append({'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min})
-                    idx += 1
-                
-                all_results.append({
-                    "sid": sid_full, "name": name, "df": stock, 
-                    "f_signal": f_signal, "boxes": boxes, "ma_p": ma_p
-                })
-            except Exception: continue
-    return all_results
+                        
+                        box_df = stock.iloc[temp_idx:]
+                        box_data = {
+                            "start_date": box_df.index[0],
+                            "high": float(box_df['Close'].max()),
+                            "low": float(box_df['Close'].min()),
+                            "days": len(box_df)
+                        }
 
-# --- 2. 執行並呈現 ---
+                latest_p = float(stock['Close'].dropna().iloc[-1])
+                results.append({
+                    "sid": sid_full, "name": name, "price": f"{latest_p:.2f}",
+                    "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
+                    "box": box_data 
+                })
+        except Exception: continue
+    return results
+
 if "data" not in st.session_state:
-    with st.spinner('讀取試算表數據中...'):
+    with st.spinner('掃描數據中...'):
         st.session_state["data"] = run_scan()
 
-for item in st.session_state["data"]:
-    # 標題僅顯示：代號 名稱 ➔ F欄位訊號
-    header = f"{item['sid']} {item['name']} ➔ {item['f_signal']}"
+if "data" in st.session_state:
+    data_list = st.session_state["data"]
     
-    with st.expander(header, expanded=True):
-        df = item['df']
-        fig = go.Figure()
-        
-        # 畫灰色箱型 (僅畫框，不畫紅線)
-        for b in item['boxes']:
-            fig.add_shape(type="rect", x0=b['start'], x1=b['end'], y0=b['bottom'], y1=b['top'],
-                          line=dict(width=0), fillcolor="gray", opacity=0.25)
+    col_t, col_b = st.columns([7, 3])
+    with col_t: st.subheader("🐯 金虎南型態監控")
+    with col_b:
+        if st.button("🔄 刷新數據"):
+            del st.session_state["data"]
+            st.rerun()
 
-        # 畫 K 線
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-                                     increasing_line_color='#d62728', decreasing_line_color='#2ca02c', name='K線'))
-        
-        # 畫 均線
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#1f77b4', width=2), name=f'{item["ma_p"]}MA'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#ff7f0e', width=1.5), name='60MA'))
+    if not data_list:
+        st.write("目前試算表中無符合訊號之股票")
+    else:
+        for item in data_list:
+            df = item['df']
+            total_len = len(df)
+            end_dt = df.index[-1]
+            
+            title_text = f"{item['sid']} {item['name']} ({item['price']}) ➔ {item['sign']}"
+            
+            with st.expander(title_text, expanded=True):
+                fig = go.Figure()
+                
+                # 1. K線圖 (細線專業版)
+                fig.add_trace(go.Candlestick(
+                    x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                    increasing_line_color='#E63946', increasing_fillcolor='#E63946',
+                    decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F',
+                    line=dict(width=0.8)
+                ))
+                
+                # 2. 短均線 (深藍細線)
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], 
+                                         line=dict(color='#0055CC', width=1.2), 
+                                         name=f"{item['s_ma_p']}MA", hoverinfo='skip'))
 
-        # 圖表佈局：固定 2 個月，移除下方拉升條 (rangeslider)
-        fig.update_layout(
-            xaxis=dict(
-                type='category', 
-                range=[len(df)-42, len(df)-0.5], 
-                showticklabels=False,
-                rangeslider=dict(visible=False) # 移除拉升條
-            ),
-            yaxis=dict(side='right'),
-            height=350, 
-            margin=dict(l=5, r=5, t=5, b=5), 
-            template="plotly_white", 
-            showlegend=False
-        )
+                # 3. 長均線 (灰色虛線)
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], 
+                                         line=dict(color='#888888', width=1, dash='dot'), 
+                                         name=f"{item['l_ma_p']}MA", hoverinfo='skip'))
 
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+                # 4. 箱型顯示 (深黑色填充)
+                if item['box']:
+                    box = item['box']
+                    fig.add_shape(type="rect",
+                                  x0=box['start_date'], x1=end_dt,
+                                  y0=box['low'], y1=box['high'],
+                                  line=dict(color="#000000", width=0.8),
+                                  fillcolor="#000000", opacity=0.2)
+
+                fig.update_layout(
+                    height=350, showlegend=False, 
+                    template="plotly_white", 
+                    xaxis_rangeslider_visible=False, 
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    # --- 設定為 120 天視野 ---
+                    xaxis=dict(
+                        type='category',
+                        range=[total_len - 60, total_len - 0.5], 
+                        showticklabels=False,
+                        fixedrange=True, 
+                        gridcolor='#F2F2F2'
+                    ),
+                    yaxis=dict(
+                        side='right', 
+                        tickfont=dict(size=10), 
+                        gridcolor='#F2F2F2',
+                        fixedrange=True
+                    ),
+                    hovermode=False 
+                )
+                
+                # 徹底轉為靜態圖片模式，適合手機
+                st.plotly_chart(fig, use_container_width=True, config={
+                    'staticPlot': True, 
+                    'displayModeBar': False
+                })
