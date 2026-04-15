@@ -4,6 +4,7 @@ import yfinance as yf
 import numpy as np
 import plotly.graph_objects as go
 import time
+import urllib.parse
 
 # --- 1. 金虎南全能分析核心 ---
 class KingTigerFullExpert:
@@ -39,35 +40,38 @@ class KingTigerFullExpert:
         return " | ".join(tags)
 
 # --- 2. 介面設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-雲端同步全能版")
-st.title("🐅 金虎南 雲端戰鬥儀表板")
+st.set_page_config(layout="wide", page_title="金虎南-大滿貫戰鬥板")
+st.title("🐅 金虎南 大滿貫全能戰鬥板")
 
 with st.sidebar:
     st.header("⚙️ 雲端與資金設定")
     total_capital = st.number_input("💵 總作戰資金 (NTD)", value=1000000)
     
-    # --- 這裡是你最關心的試算表連動區 ---
-    st.markdown("### 📋 試算表同步")
-    sheet_id = st.text_input("Google Sheet ID", "你的試算表ID填在這裡")
-    sheet_name = st.text_input("工作表名稱", "Sheet1")
+    st.markdown("### 📋 試算表連動")
+    # 預設直接填入你的正確 ID，避免編碼錯誤
+    default_id = "1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
+    sheet_id = st.text_input("Google Sheet ID", value=default_id)
+    sheet_name = st.text_input("工作表名稱", "工作表1") # 你的網址顯示是 gid=0，通常是工作表1
     
     run_btn = st.button("🚀 讀取雲端名單並開始掃描")
-    st.info("💡 程式會自動讀取第一欄作為股票代號")
+    st.info("💡 提醒：請確保試算表已開啟『知道連結的人皆可檢視』")
 
 if run_btn:
     try:
-        # 1. 讀取 Google 試算表
-        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+        # 安全處理 URL
+        safe_id = urllib.parse.quote(sheet_id.strip())
+        safe_name = urllib.parse.quote(sheet_name.strip())
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{safe_id}/gviz/tq?tqx=out:csv&sheet={safe_name}"
+        
         raw_data = pd.read_csv(sheet_url)
-        tickers = raw_data.iloc[:, 0].dropna().tolist() # 自動抓第一欄
+        tickers = raw_data.iloc[:, 0].dropna().tolist()
         st.success(f"✅ 成功讀取 {len(tickers)} 檔標的")
         
-        # 2. 抓取大盤
+        # 抓取大盤
         market_df = yf.download("^TWII", period="6mo", progress=False)
         if not market_df.empty and isinstance(market_df.columns, pd.MultiIndex):
             market_df.columns = market_df.columns.get_level_values(0)
 
-        # 3. 逐一分析
         for ticker in tickers:
             ticker = str(ticker).strip()
             if not ticker: continue
@@ -80,19 +84,26 @@ if run_btn:
 
                 expert = KingTigerFullExpert(df, market_df, total_capital)
                 
-                # 繪製 K 線圖
+                # --- 繪製 K 線圖 ---
                 fig = go.Figure(data=[go.Candlestick(
                     x=df.index, open=df['Open'], high=df['High'],
                     low=df['Low'], close=df['Close'], name='K線'
                 )])
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='yellow', width=1), name='5MA'))
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA19'], line=dict(color='orange', width=2), name='19MA'))
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='green', width=1.5), name='60MA'))
-                fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], line=dict(color='yellow', width=1.5), name='5MA'))
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA19'], line=dict(color='#FF9900', width=2.5), name='19MA'))
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], line=dict(color='#00FF00', width=1.5), name='60MA'))
                 
-                # 顯示
-                st.write(f"### 📌 {ticker}")
+                fig.update_layout(
+                    height=500, xaxis_rangeslider_visible=False, 
+                    template="plotly_dark",
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+                # --- 顯示區塊 ---
+                st.write(f"## 📌 {ticker}")
                 st.success(f"{expert.get_market_status()} | {expert.get_signal_tags()}")
+                
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # 戰術數據
@@ -110,4 +121,4 @@ if run_btn:
                 st.error(f"分析 {ticker} 失敗: {e}")
 
     except Exception as e:
-        st.error(f"❌ 無法讀取試算表，請確認 ID 是否正確且權限已開啟（知道連結的人皆可檢視）。\n錯誤訊息: {e}")
+        st.error(f"❌ 讀取失敗。請確認試算表 ID 正確且已公開分享。\n詳細錯誤: {e}")
