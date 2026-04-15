@@ -1,135 +1,129 @@
 import streamlit as st
+import plotly.graph_objects as go
 import pandas as pd
 import yfinance as yf
-import numpy as np
-import plotly.graph_objects as go
-import time
+import requests
+import io
 
-# --- 1. 金虎南全能分析核心 (純淨版) ---
-class KingTigerPureExpert:
-    def __init__(self, df, market_df, total_capital, s_period, l_period):
-        self.df = df.copy()
-        self.market_df = market_df
-        self.total_capital = total_capital
-        
-        # 嚴格處理參數：沒填就是 None
+# --- 1. 網頁基本設定 ---
+st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
+
+MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
+
+def run_scan():
+    base_url = MY_SHEET_URL.split('/edit')[0]
+    csv_url = f"{base_url}/export?format=csv&gid=0"
+    try:
+        res = requests.get(csv_url, timeout=15)
+        res.encoding = 'utf-8'
+        if res.status_code != 200: return []
+        raw_df = pd.read_csv(io.StringIO(res.text))
+    except Exception: return []
+
+    results = []
+    for i, row in raw_df.iterrows():
         try:
-            self.s_period = int(s_period) if pd.notna(s_period) and float(s_period) > 0 else None
-        except:
-            self.s_period = None
+            if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
             
-        try:
-            self.l_period = int(l_period) if pd.notna(l_period) and float(l_period) > 0 else None
-        except:
-            self.l_period = None
-        
-        # 動態計算均線 (僅計算有設定的部分)
-        if self.s_period:
-            self.df['S_MA'] = self.df['Close'].rolling(window=self.s_period).mean()
-        if self.l_period:
-            self.df['L_MA'] = self.df['Close'].rolling(window=self.l_period).mean()
+            # 核心過濾：只要 F 欄位有字，就代表你想監控這檔，不論是否在區間內都顯示
+            sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+            if sign == "": continue 
             
-        # 僅保留金虎南核心縮量指標需要的 20MA
-        self.df['Vol_MA20'] = self.df['Volume'].rolling(window=20).mean()
-        self.latest = self.df.iloc[-1]
-        
-    def get_market_status(self):
-        if self.market_df is None or self.market_df.empty: return "⚪ 大盤同步中..."
-        m_latest = self.market_df.iloc[-1]
-        m_ma20 = self.market_df['Close'].rolling(window=20).mean().iloc[-1]
-        return "🟢 大盤多頭" if m_latest['Close'] > m_ma20 else "🔴 大盤空頭"
+            sid_raw = str(row.iloc[0]).split('.')[0].strip()
+            sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
+            name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
+            s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
+            l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
 
-    def get_signal_tags(self):
-        tags = []
-        # 只有當長短均線都有設定，才判斷交叉
-        if self.s_period and self.l_period:
-            if self.latest['S_MA'] > self.latest['L_MA']:
-                tags.append(f"🔥 金牛({self.s_period}/{self.l_period})")
-            else:
-                tags.append(f"💀 死亡({self.s_period}/{self.l_period})")
+            stock = yf.download(sid_full, period="120d", progress=False)
+            if not stock.empty:
+                if isinstance(stock.columns, pd.MultiIndex):
+                    stock.columns = stock.columns.get_level_values(0)
+                
+                # 計算均線
+                s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else 20
+                l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
+                stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
+                stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
+                
+                # --- 自動尋找最近的箱型區間 (目測輔助用) ---
+                view_df = stock.tail(42)
+                best_box = None
+                idx = 0
+                while idx < len(view_df) - 2:
+                    w = view_df.iloc[idx:idx+3]
+                    w_max, w_min = w['High'].max(), w['Low'].min()
+                    # 波動在 3% 內視為基礎區間
+                    if (w_max - w_min) / w_min <= 0.03:
+                        start_i = idx
+                        while idx < len(view_df) - 1:
+                            nr = view_df.iloc[idx+1]
+                            if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
+                                idx += 1
+                            else:
+                                break
+                        best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
+                    idx += 1
+
+                latest_p = float(stock['Close'].iloc[-1])
+                results.append({
+                    "sid": sid_full, "name": name, "price": latest_p,
+                    "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
+                    "box": best_box 
+                })
+        except Exception: continue
+    return results
+
+# --- 2. 呈現介面 ---
+if "data" not in st.session_state:
+    with st.spinner('讀取訊號中...'):
+        st.session_state["data"] = run_scan()
+
+data_list = st.session_state.get("data", [])
+
+col_t, col_b = st.columns([8, 2])
+with col_t: st.subheader("🐯 金虎南-訊號監控")
+with col_b:
+    if st.button("🔄 刷新"):
+        del st.session_state["data"]
+        st.rerun()
+
+if not data_list:
+    st.info("試算表 F 欄位目前無訊號標註。")
+else:
+    for item in data_list:
+        df = item['df']
+        total_len = len(df)
+        header = f"{item['sid']} {item['name']} ({item['price']:.2f}) ➔ {item['sign']}"
         
-        # 基礎金虎南特徵
-        if len(self.df) >= 2:
-            is_up_2d = self.df['Close'].iloc[-1] > self.df['Close'].iloc[-2]
-            tags.append("✅ 2日強勢" if is_up_2d else "📉 2日整理")
+        with st.expander(header, expanded=True):
+            fig = go.Figure()
             
-        vol_dry = self.df['Volume'].tail(3).mean() < self.latest['Vol_MA20'] * 0.75
-        if vol_dry: tags.append("💎 縮量緊湊")
-        return " | ".join(tags)
+            # 畫灰色小框 (只要有找到區間就畫，不管現在價格在哪)
+            if item['box']:
+                b = item['box']
+                fig.add_shape(type="rect", x0=b['start'], x1=b['end'], y0=b['bottom'], y1=b['top'],
+                              line=dict(width=0), fillcolor="gray", opacity=0.3)
 
-# --- 2. 介面設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-純淨版")
-st.title("🐅 金虎南 純淨客製戰鬥板")
-
-SHEET_ID = "1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-
-with st.sidebar:
-    st.header("⚙️ 系統設定")
-    total_capital = st.number_input("💵 總作戰資金 (NTD)", value=1000000)
-    run_btn = st.button("🚀 執行自動掃描", use_container_width=True)
-
-if run_btn:
-    # 讀取雙表 (請確認工作表2的 GID 是否正確)
-    gids = ["0", "174175319"] 
-    all_data = []
-
-    for gid in gids:
-        try:
-            url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}"
-            all_data.append(pd.read_csv(url))
-        except:
-            continue
-
-    if all_data:
-        full_list = pd.concat(all_data).dropna(subset=[all_data[0].columns[0]])
-        
-        market_df = yf.download("^TWII", period="6mo", progress=False)
-        if not market_df.empty and isinstance(market_df.columns, pd.MultiIndex):
-            market_df.columns = market_df.columns.get_level_values(0)
-
-        for _, row in full_list.iterrows():
-            ticker = str(row.iloc[0]).strip()
-            if not ticker or ticker == "nan": continue
+            # K線 (2個月視野，K棒寬度設為 1.2 較好目測)
+            fig.add_trace(go.Candlestick(
+                x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                increasing_line_color='#E63946', increasing_fillcolor='#E63946',
+                decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F',
+                line=dict(width=1.2)
+            ))
             
-            s_val = row.iloc[1] if len(row) > 1 else None
-            l_val = row.iloc[2] if len(row) > 2 else None
+            # 短/長均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
 
-            try:
-                df = yf.download(ticker, period="1y", progress=False)
-                if df.empty: continue
-                if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = df.columns.get_level_values(0)
-
-                expert = KingTigerPureExpert(df, market_df, total_capital, s_val, l_val)
-                
-                # --- 圖表：完全客製 ---
-                fig = go.Figure(data=[go.Candlestick(
-                    x=df.index, open=df['Open'], high=df['High'],
-                    low=df['Low'], close=df['Close'], name='K線'
-                )])
-                
-                if expert.s_period:
-                    fig.add_trace(go.Scatter(x=df.index, y=df['S_MA'], line=dict(color='yellow', width=1.5), name=f'{expert.s_period}MA'))
-                if expert.l_period:
-                    fig.add_trace(go.Scatter(x=df.index, y=df['L_MA'], line=dict(color='#FF9900', width=2.5), name=f'{expert.l_period}MA'))
-                
-                fig.update_layout(height=450, xaxis_rangeslider_visible=False, template="plotly_dark", margin=dict(l=10, r=10, t=30, b=10))
-                
-                # --- 顯示 ---
-                st.write(f"## 📌 {ticker}")
-                st.success(f"{expert.get_market_status()} | {expert.get_signal_tags()}")
-                st.plotly_chart(fig, use_container_width=True)
-                
-                if expert.l_period:
-                    buy_p = expert.latest['L_MA'] * 1.015
-                    trail_p = max(df['Low'].tail(5).min(), expert.latest['L_MA'])
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric(f"🔥 {expert.l_period}MA+1.5%", f"{buy_p:.2f}")
-                    c2.metric("📈 動態停利點", f"{trail_p:.2f}")
-                    c3.metric("🚫 10% 鋼鐵停損", f"{buy_p * 0.9:.2f}")
-                    c4.metric("💰 建議試單 (20%)", f"${total_capital * 0.2:,.0f}")
-                
-                st.divider()
-
-            except Exception as e:
-                st.error(f"分析 {ticker} 出錯: {e}")
+            fig.update_layout(
+                height=380, showlegend=False, template="plotly_white",
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=5, r=5, t=5, b=5),
+                # 固定 2 個月 (42天) 視角
+                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
+                yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
+                hovermode=False
+            )
+            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False})
