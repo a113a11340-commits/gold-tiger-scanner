@@ -8,26 +8,21 @@ import io
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
 
-MY_SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-GIDS = ["0", "1241939414", "534437042"]
+MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
 def run_scan():
-    all_raw_rows = []
-    for gid in GIDS:
-        csv_url = f"{MY_SHEET_BASE}/export?format=csv&gid={gid}"
-        try:
-            res = requests.get(csv_url, timeout=15)
-            res.encoding = 'utf-8'
-            if res.status_code == 200:
-                df_part = pd.read_csv(io.StringIO(res.text))
-                all_raw_rows.append(df_part)
-        except Exception: continue
+    base_url = MY_SHEET_URL.split('/edit')[0]
+    csv_url = f"{base_url}/export?format=csv&gid=0"
+    try:
+        res = requests.get(csv_url, timeout=15)
+        res.encoding = 'utf-8'
+        if res.status_code != 200: return []
+        raw_df = pd.read_csv(io.StringIO(res.text))
+    except Exception: return []
 
-    if not all_raw_rows: return []
-    raw_df = pd.concat(all_raw_rows, ignore_index=True)
-
+    # --- 建議 4 優化：先收集所有需要下載的代號 ---
     temp_rows = []
-    all_sids_set = set()
+    all_sids = []
     for i, row in raw_df.iterrows():
         if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
         sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
@@ -35,14 +30,14 @@ def run_scan():
         
         sid_raw = str(row.iloc[0]).split('.')[0].strip()
         sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
-        all_sids_set.add(sid_full)
+        all_sids.append(sid_full)
         temp_rows.append({'sid_full': sid_full, 'row': row, 'sign': sign})
 
-    if not temp_rows: return []
+    if not all_sids: return []
 
-    download_list = list(all_sids_set)
-    # 下載 200 天確保長均線有足夠數據計算
-    all_data = yf.download(download_list, period="200d", progress=False, group_by='ticker')
+    # --- 建議 4 & 1：一次性下載並處理 MultiIndex ---
+    # 使用 threads=True 加速，auto_adjust 確保欄位一致
+    all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker')
     
     results = []
     for item in temp_rows:
@@ -51,51 +46,50 @@ def run_scan():
             row = item['row']
             sign = item['sign']
             
-            stock = all_data[sid_full].copy() if len(download_list) > 1 else all_data.copy()
+            # 針對單檔或多檔下載的情況處理 DataFrame
+            if len(all_sids) > 1:
+                stock = all_data[sid_full].copy()
+            else:
+                stock = all_data.copy()
+            
+            # 建議 1：確保索引平坦化，移除可能存在的多層索引
             if isinstance(stock.columns, pd.MultiIndex):
                 stock.columns = stock.columns.get_level_values(0)
             
-            stock.dropna(subset=['Close'], inplace=True)
-            if stock.empty: continue
+            if stock.empty or 'Close' not in stock.columns: continue
 
-            # 均線處理：若試算表空白則不顯示
+            # 原有邏輯：計算均線
             name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
-            s_val = pd.to_numeric(row.iloc[2], errors='coerce')
-            l_val = pd.to_numeric(row.iloc[3], errors='coerce')
+            s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
+            l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
+            s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else 20
+            l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
+            stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
+            stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
             
-            if pd.notna(s_val): stock['MA_S'] = stock['Close'].rolling(window=int(s_val)).mean()
-            if pd.notna(l_val): stock['MA_L'] = stock['Close'].rolling(window=int(l_val)).mean()
-            
-            # 箱型偵測邏輯：尋找最新的一個符合連續 3 天 3% 內的區間
+            # 原有邏輯：尋找箱型
             view_df = stock.tail(42)
             best_box = None
-            if len(view_df) >= 3:
-                idx = 0
-                while idx < len(view_df) - 2:
-                    w = view_df.iloc[idx:idx+3]
-                    w_max, w_min = w['High'].max(), w['Low'].min()
-                    # 判斷是否連續 3 天波動在 3% 內
-                    if (w_max - w_min) / (w_min if w_min > 0 else 1) <= 0.03:
-                        start_i = idx
-                        # 往右延伸，直到股價離開原本 3 天定義的範圍 (加上 1.5% 寬容度)
-                        while idx < len(view_df) - 1:
-                            nr = view_df.iloc[idx+1]
-                            if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
-                                idx += 1
-                            else:
-                                break
-                        # 儲存箱型區間
-                        best_box = {
-                            'start': view_df.index[start_i], 
-                            'end': view_df.index[idx], # 這就是「往右延伸但離開區間就停止」的點
-                            'top': w_max, 
-                            'bottom': w_min
-                        }
-                    idx += 1
+            idx = 0
+            while idx < len(view_df) - 2:
+                w = view_df.iloc[idx:idx+3]
+                w_max, w_min = w['High'].max(), w['Low'].min()
+                if (w_max - w_min) / w_min <= 0.03:
+                    start_i = idx
+                    while idx < len(view_df) - 1:
+                        nr = view_df.iloc[idx+1]
+                        if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
+                            idx += 1
+                        else:
+                            break
+                    best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
+                idx += 1
 
             latest_p = float(stock['Close'].iloc[-1])
             results.append({
-                "sid": sid_full, "name": name, "price": latest_p, "sign": sign, "df": stock, "box": best_box 
+                "sid": sid_full, "name": name, "price": latest_p,
+                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
+                "box": best_box 
             })
         except Exception: continue
     return results
@@ -125,22 +119,22 @@ else:
         with st.expander(header, expanded=True):
             fig = go.Figure()
             
-            # --- 箱型：僅畫出偵測到的區間，不延生至最新根 ---
+            # --- 建議 2：箱型區間視覺延展 ---
             if item['box']:
                 b = item['box']
                 fig.add_shape(
                     type="rect", 
                     x0=b['start'], 
-                    x1=b['end'], # 僅延伸到盤整結束的那一天，不再往左或無止盡往右
+                    x1=df.index[-1], # 修改邏輯：延伸到最新一根 K 棒
                     y0=b['bottom'], 
                     y1=b['top'],
-                    line=dict(color="gray", width=1), 
+                    line=dict(width=0), 
                     fillcolor="gray", 
                     opacity=0.3,
-                    layer="below"
+                    layer="below"    # 確保不會蓋住 K 線
                 )
 
-            # K線圖
+            # K線
             fig.add_trace(go.Candlestick(
                 x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                 increasing_line_color='#E63946', increasing_fillcolor='#E63946',
@@ -148,20 +142,15 @@ else:
                 line=dict(width=1.2)
             ))
             
-            # 均線繪製 (欄位存在才畫)
-            if 'MA_S' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
-            if 'MA_L' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
+            # 短/長均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
 
-            # 修正 X 軸範圍以防空白圖表
-            display_start = max(0, total_len - 42)
-            
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
                 xaxis_rangeslider_visible=False,
                 margin=dict(l=5, r=5, t=5, b=5),
-                xaxis=dict(type='category', range=[display_start, total_len - 0.5], showticklabels=False, fixedrange=True),
+                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
                 yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
                 hovermode=False
             )
