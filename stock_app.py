@@ -1,186 +1,157 @@
-下午 06:50 2026/4/18import streamlit as st
+import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import yfinance as yf
 import requests
 import io
-import numpy as np
-from collections import Counter
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南小箱型-搬家整合版")
+st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
 
-# 更新後的試算表網址
-MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4/edit"
+MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
-# --- 2. 金唬男核心邏輯：小箱型偵測演算法 ---
-def analyze_gold_tiger_box(df, ma_window):
-    """
-    1. 尋找區間：往回找觸線 K 棒，連續 2 天未觸碰則斷線 [cite: 1]
-    2. 形成門檻：區間內觸線天數必須 >= 3 天 [cite: 1]
-    3. 動態共振線：統計頻率最高價位 [cite: 1]
-    4. 箱頂定義：Max(最強共振線, 區間最高收盤價) [cite: 1]
-    """
-    if len(df) < 60: return None
-    
-    # 計算均線
-    df['MA'] = df['Close'].rolling(window=ma_window).mean()
-    prices = df.copy()
-    
-    box_indices = []
-    gap_count = 0
-    
-    # 從最新的一天往回掃描 (2天斷線邏輯)
-    for i in range(len(prices)-1, -1, -1):
-        row = prices.iloc[i]
-        if pd.isna(row['MA']): continue
-        
-        # 觸線條件：高點 >= 均線 且 低點 <= 均線
-        is_touching = (row['High'] >= row['MA']) and (row['Low'] <= row['MA'])
-        
-        if is_touching:
-            box_indices.append(i)
-            gap_count = 0 # 重置斷線計數
-        else:
-            gap_count += 1
-            
-        # 終止條件：一旦出現連續 2 天未觸碰均線，即判定該箱體區間結束 [cite: 1]
-        if gap_count >= 2:
-            break
-            
-    # 形成門檻：區間內觸線天數必須 ≥3 天，小箱型才成立 [cite: 1]
-    if len(box_indices) < 3:
-        return None
-    
-    # 取得箱體區間資料
-    start_idx = min(box_indices)
-    end_idx = max(box_indices)
-    box_df = prices.iloc[start_idx : end_idx + 1]
-    
-    # 動態共振線計算：找出出現頻率最高（共振次數最多）的價位 [cite: 1]
-    all_points = pd.concat([box_df['Close'], box_df['High']]).round(2).tolist()
-    counts = Counter(all_points)
-    max_freq = max(counts.values())
-    resonance_candidates = [price for price, freq in counts.items() if freq == max_freq]
-    resonance_line = max(resonance_candidates) # 若次數相同，以價格高者為準 [cite: 1]
-    
-    # 箱頂定義：取 Max(最強共振線價位, 區間最高收盤價) [cite: 1]
-    box_top = max(resonance_line, box_df['Close'].max())
-    box_bottom_min = box_df['Close'].min() 
-    
-    # 突破/跌破判定 (含 1.5% 緩衝與量能)
-    current_price = prices['Close'].iloc[-1]
-    current_ma = prices['MA'].iloc[-1]
-    prev_vol = prices['Volume'].iloc[-2]
-    curr_vol = prices['Volume'].iloc[-1]
-    
-    buffer_up = max(box_top, current_ma * 1.015) # 空間：當前收盤價 > Max(箱頂, 均線 ×1.015) [cite: 1]
-    buffer_down = min(box_bottom_min, current_ma * 0.985) # 跌破：當前收盤價 < Min(最低收盤, 均線 ×0.985) [cite: 1]
-    
-    # 能量過濾：當前成交量 > 昨日成交量 ×1.2 [cite: 1]
-    vol_pass = curr_vol > prev_vol * 1.2
-    
-    status = "⌛ 延續小箱型 [盤整中]"
-    if current_price > buffer_up and vol_pass:
-        status = "🚀 正式突破 [多頭表態]"
-    elif current_price < buffer_down:
-        status = "📉 向下跌破 [型態失效]"
-    
-    return {
-        "box_top": box_top,
-        "buffer_up": buffer_up,
-        "buffer_down": buffer_down,
-        "box_start": box_df.index[0],
-        "box_end": box_df.index[-1],
-        "status": f"{status} ({len(box_df)}天)",
-        "count": len(box_df)
-    }
-
-# --- 3. 掃描引擎 ---
 def run_scan():
-    csv_url = MY_SHEET_URL.split('/edit')[0] + '/export?format=csv&gid=0'
+    base_url = MY_SHEET_URL.split('/edit')[0]
+    csv_url = f"{base_url}/export?format=csv&gid=0"
     try:
-        res = requests.get(csv_url, timeout=10)
+        res = requests.get(csv_url, timeout=15)
         res.encoding = 'utf-8'
+        if res.status_code != 200: return []
         raw_df = pd.read_csv(io.StringIO(res.text))
-    except: return []
+    except Exception: return []
 
-    results = []
+    # --- 建議 4 優化：先收集所有需要下載的代號 ---
+    temp_rows = []
+    all_sids = []
     for i, row in raw_df.iterrows():
+        if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
+        sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+        if sign == "": continue 
+        
+        sid_raw = str(row.iloc[0]).split('.')[0].strip()
+        sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
+        all_sids.append(sid_full)
+        temp_rows.append({'sid_full': sid_full, 'row': row, 'sign': sign})
+
+    if not all_sids: return []
+
+    # --- 建議 4 & 1：一次性下載並處理 MultiIndex ---
+    # 使用 threads=True 加速，auto_adjust 確保欄位一致
+    all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker')
+    
+    results = []
+    for item in temp_rows:
         try:
-            sid_raw = str(row.iloc[0]).split('.')[0].strip()
-            if not sid_raw or sid_raw == "nan": continue
-            sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
+            sid_full = item['sid_full']
+            row = item['row']
+            sign = item['sign']
             
-            # 計算用 250 天，確保數據足夠
-            stock = yf.download(sid_full, period="250d", progress=False)
-            if stock.empty: continue
-            if isinstance(stock.columns, pd.MultiIndex): stock.columns = stock.columns.get_level_values(0)
+            # 針對單檔或多檔下載的情況處理 DataFrame
+            if len(all_sids) > 1:
+                stock = all_data[sid_full].copy()
+            else:
+                stock = all_data.copy()
             
-            ma_window = int(row.iloc[2]) if pd.notna(row.iloc[2]) else 20
-            box_data = analyze_gold_tiger_box(stock, ma_window)
+            # 建議 1：確保索引平坦化，移除可能存在的多層索引
+            if isinstance(stock.columns, pd.MultiIndex):
+                stock.columns = stock.columns.get_level_values(0)
             
+            if stock.empty or 'Close' not in stock.columns: continue
+
+            # 原有邏輯：計算均線
+            name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
+            s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
+            l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
+            s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else 20
+            l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
+            stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
+            stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
+            
+            # 原有邏輯：尋找箱型
+            view_df = stock.tail(42)
+            best_box = None
+            idx = 0
+            while idx < len(view_df) - 2:
+                w = view_df.iloc[idx:idx+3]
+                w_max, w_min = w['High'].max(), w['Low'].min()
+                if (w_max - w_min) / w_min <= 0.03:
+                    start_i = idx
+                    while idx < len(view_df) - 1:
+                        nr = view_df.iloc[idx+1]
+                        if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
+                            idx += 1
+                        else:
+                            break
+                    best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
+                idx += 1
+
+            latest_p = float(stock['Close'].iloc[-1])
             results.append({
-                "sid": sid_full, "name": row.iloc[1], "price": stock['Close'].iloc[-1],
-                "sign": row.iloc[5], "df": stock, "box": box_data, "ma_window": ma_window
+                "sid": sid_full, "name": name, "price": latest_p,
+                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
+                "box": best_box 
             })
-        except: continue
+        except Exception: continue
     return results
 
-# --- 4. 畫面顯示 ---
-st.title("🐯 金虎南手機版-小箱型邏輯整合")
-
+# --- 2. 呈現介面 ---
 if "data" not in st.session_state:
-    with st.spinner('同步金唬男規格中...'):
+    with st.spinner('讀取訊號中...'):
         st.session_state["data"] = run_scan()
 
-if st.button("🔄 刷新數據"):
-    del st.session_state["data"]
-    st.rerun()
+data_list = st.session_state.get("data", [])
 
-for item in st.session_state["data"]:
-    df = item['df']
-    # 顯示 2 個月數據 (約 42 個交易日) [cite: 1]
-    display_df = df.iloc[-42:]
-    box = item['box']
-    
-    title = f"{item['sid']} {item['name']} | {item['price']:.2f} | {box['status'] if box else '無符合箱型'}"
-    with st.expander(title, expanded=True):
+col_t, col_b = st.columns([8, 2])
+with col_t: st.subheader("🐯 金虎南-訊號監控")
+with col_b:
+    if st.button("🔄 刷新"):
+        del st.session_state["data"]
+        st.rerun()
+
+if not data_list:
+    st.info("試算表 F 欄位目前無訊號標註。")
+else:
+    for item in data_list:
+        df = item['df']
+        total_len = len(df)
+        header = f"{item['sid']} {item['name']} ({item['price']:.2f}) ➔ {item['sign']}"
         
-        fig = go.Figure()
-        # K線
-        fig.add_trace(go.Candlestick(
-            x=display_df.index, open=display_df['Open'], high=display_df['High'], 
-            low=display_df['Low'], close=display_df['Close'],
-            increasing_line_color='red', decreasing_line_color='green', name="K線"
-        ))
-        
-        # 均線
-        ma_line = df['MA'].iloc[-42:]
-        fig.add_trace(go.Scatter(x=display_df.index, y=ma_line, line=dict(color='yellow', width=1), name="MA"))
-
-        if box:
-            # 畫出：共振箱頂水平線 (紅色粗實線) [cite: 1]
-            fig.add_shape(type="line", x0=display_df.index[0], x1=display_df.index[-1],
-                          y0=box['box_top'], y1=box['box_top'],
-                          line=dict(color="red", width=2))
+        with st.expander(header, expanded=True):
+            fig = go.Figure()
             
-            # 畫出：均線 +1.5% 緩衝線 (白色虛線) [cite: 1]
-            fig.add_shape(type="line", x0=display_df.index[0], x1=display_df.index[-1],
-                          y0=box['buffer_up'], y1=box['buffer_up'],
-                          line=dict(color="white", width=1, dash="dash"))
-            
-            # 文字資訊顯示
-            st.write(f"📊 **箱體分析**：{box['status']}")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("共振箱頂", f"{box['box_top']:.2f}")
-            c2.metric("突破門檻", f"{box['buffer_up']:.2f}")
-            c3.metric("跌破門檻", f"{box['buffer_down']:.2f}")
+            # --- 建議 2：箱型區間視覺延展 ---
+            if item['box']:
+                b = item['box']
+                fig.add_shape(
+                    type="rect", 
+                    x0=b['start'], 
+                    x1=df.index[-1], # 修改邏輯：延伸到最新一根 K 棒
+                    y0=b['bottom'], 
+                    y1=b['top'],
+                    line=dict(width=0), 
+                    fillcolor="gray", 
+                    opacity=0.3,
+                    layer="below"    # 確保不會蓋住 K 線
+                )
 
-        fig.update_layout(
-            height=300, margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_rangeslider_visible=False, template="plotly_dark",
-            xaxis=dict(type='category', showticklabels=False),
-            yaxis=dict(side='right')
-        )
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            # K線
+            fig.add_trace(go.Candlestick(
+                x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                increasing_line_color='#E63946', increasing_fillcolor='#E63946',
+                decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F',
+                line=dict(width=1.2)
+            ))
+            
+            # 短/長均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
+
+            fig.update_layout(
+                height=380, showlegend=False, template="plotly_white",
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=5, r=5, t=5, b=5),
+                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
+                yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
+                hovermode=False
+            )
+            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False})
