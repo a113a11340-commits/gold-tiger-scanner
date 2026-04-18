@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
+st.set_page_config(layout="wide", page_title="金虎南-監控版")
 
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
@@ -20,7 +20,6 @@ def run_scan():
         raw_df = pd.read_csv(io.StringIO(res.text))
     except Exception: return []
 
-    # --- 建議 4 優化：先收集所有需要下載的代號 ---
     temp_rows = []
     all_sids = []
     for i, row in raw_df.iterrows():
@@ -35,8 +34,6 @@ def run_scan():
 
     if not all_sids: return []
 
-    # --- 建議 4 & 1：一次性下載並處理 MultiIndex ---
-    # 使用 threads=True 加速，auto_adjust 確保欄位一致
     all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker')
     
     results = []
@@ -46,19 +43,17 @@ def run_scan():
             row = item['row']
             sign = item['sign']
             
-            # 針對單檔或多檔下載的情況處理 DataFrame
             if len(all_sids) > 1:
                 stock = all_data[sid_full].copy()
             else:
                 stock = all_data.copy()
             
-            # 建議 1：確保索引平坦化，移除可能存在的多層索引
             if isinstance(stock.columns, pd.MultiIndex):
                 stock.columns = stock.columns.get_level_values(0)
             
             if stock.empty or 'Close' not in stock.columns: continue
 
-            # 原有邏輯：計算均線
+            # 計算均線
             name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
             s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
             l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
@@ -66,30 +61,11 @@ def run_scan():
             l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
             stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
             stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
-            
-            # 原有邏輯：尋找箱型
-            view_df = stock.tail(42)
-            best_box = None
-            idx = 0
-            while idx < len(view_df) - 2:
-                w = view_df.iloc[idx:idx+3]
-                w_max, w_min = w['High'].max(), w['Low'].min()
-                if (w_max - w_min) / w_min <= 0.03:
-                    start_i = idx
-                    while idx < len(view_df) - 1:
-                        nr = view_df.iloc[idx+1]
-                        if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
-                            idx += 1
-                        else:
-                            break
-                    best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
-                idx += 1
 
             latest_p = float(stock['Close'].iloc[-1])
             results.append({
                 "sid": sid_full, "name": name, "price": latest_p,
-                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
-                "box": best_box 
+                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock
             })
         except Exception: continue
     return results
@@ -118,21 +94,6 @@ else:
         
         with st.expander(header, expanded=True):
             fig = go.Figure()
-            
-            # --- 建議 2：箱型區間視覺延展 ---
-            if item['box']:
-                b = item['box']
-                fig.add_shape(
-                    type="rect", 
-                    x0=b['start'], 
-                    x1=df.index[-1], # 修改邏輯：延伸到最新一根 K 棒
-                    y0=b['bottom'], 
-                    y1=b['top'],
-                    line=dict(width=0), 
-                    fillcolor="gray", 
-                    opacity=0.3,
-                    layer="below"    # 確保不會蓋住 K 線
-                )
 
             # K線
             fig.add_trace(go.Candlestick(
