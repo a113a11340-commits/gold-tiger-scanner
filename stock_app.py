@@ -8,28 +8,34 @@ import io
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
 
-# 設定試算表基礎網址與需要掃描的分頁 GID
+# 你的試算表網址與三個分頁 GID
 MY_SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
 SHEET_GIDS = ["0", "534437042", "1241939414"] 
 
 def run_scan():
-    all_sids_info = [] # 用來儲存所有分頁抓到的股票資訊
-    sids_to_download = set() # 用來儲存去重後的代號，供一次性下載
+    all_sids_info = []
+    sids_to_download = set()
 
-    # 遍歷所有分頁抓取代號
+    # 修正網址邏輯：強制切除 /edit 之後的參數，確保使用乾淨的 /export
+    clean_base = MY_SHEET_BASE.split('/edit')[0]
+
     for gid in SHEET_GIDS:
-        csv_url = f"{MY_SHEET_BASE}/export?format=csv&gid={gid}"
+        csv_url = f"{clean_base}/export?format=csv&gid={gid}"
         try:
             res = requests.get(csv_url, timeout=15)
             res.encoding = 'utf-8'
-            if res.status_code != 200: continue
+            
+            # 檢查是否抓到正確 CSV (若顯示 <html 或 <!DOCTYPE 代表未發佈或權限不足)
+            if res.status_code != 200 or res.text.strip().startswith("<!DOCTYPE") or res.text.strip().startswith("<html"):
+                continue
+            
             raw_df = pd.read_csv(io.StringIO(res.text))
             
             for i, row in raw_df.iterrows():
-                # 判斷第一欄是否有代號
+                # A 欄位 (代號) 檢查
                 if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
                 
-                # 核心過濾：只要 F 欄位有字就監控
+                # F 欄位 (訊號) 檢查
                 sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
                 if sign == "": continue 
                 
@@ -47,24 +53,25 @@ def run_scan():
 
     if not sids_to_download: return []
 
-    # --- 執行批量下載 (避免超過使用限制) ---
-    all_data = yf.download(list(sids_to_download), period="120d", progress=False, group_by='ticker')
+    # --- 效能優化：一次性下載 ---
+    download_list = list(sids_to_download)
+    all_data = yf.download(download_list, period="120d", progress=False, group_by='ticker')
 
     results = []
     for item in all_sids_info:
         try:
             sid_full = item['sid_full']
-            # 處理單檔與多檔下載時的資料結構差異
-            if len(sids_to_download) > 1:
+            
+            # 處理單檔與多檔下載的資料結構差異 (處理 MultiIndex)
+            if len(download_list) > 1:
                 stock = all_data[sid_full].copy()
             else:
                 stock = all_data.copy()
 
-            # 解決 MultiIndex 問題，確保 Close 欄位可讀取
             if isinstance(stock.columns, pd.MultiIndex):
                 stock.columns = stock.columns.get_level_values(0)
             
-            if stock.empty: continue
+            if stock.empty or 'Close' not in stock.columns: continue
 
             # 原有邏輯：計算均線
             row = item['row']
@@ -73,10 +80,11 @@ def run_scan():
             l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
             s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else 20
             l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
+            
             stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
             stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
             
-            # 原有邏輯：尋找最近箱型
+            # 原有邏輯：尋找箱型 (維持原狀，不延展)
             view_df = stock.tail(42)
             best_box = None
             idx = 0
@@ -106,20 +114,20 @@ def run_scan():
 
 # --- 2. 呈現介面 ---
 if "data" not in st.session_state:
-    with st.spinner('讀取多分頁訊號中...'):
+    with st.spinner('同步掃描多個分頁中...'):
         st.session_state["data"] = run_scan()
 
 data_list = st.session_state.get("data", [])
 
 col_t, col_b = st.columns([8, 2])
-with col_t: st.subheader("🐯 金虎南-全方位監控")
+with col_t: st.subheader("🐯 金虎南-多分頁監控")
 with col_b:
     if st.button("🔄 刷新"):
         del st.session_state["data"]
         st.rerun()
 
 if not data_list:
-    st.info("所選分頁的 F 欄位目前皆無訊號標註。")
+    st.info("目前的分頁中，F 欄位無任何訊號標註。請檢查是否已執行『發佈到網路』。")
 else:
     for item in data_list:
         df = item['df']
@@ -129,11 +137,11 @@ else:
         with st.expander(header, expanded=True):
             fig = go.Figure()
             
-            # 畫灰色小框 (視覺優化：延伸至最新 K 棒並置於底層)
+            # 畫灰色小框 (維持原有邏輯)
             if item['box']:
                 b = item['box']
-                fig.add_shape(type="rect", x0=b['start'], x1=df.index[-1], y0=b['bottom'], y1=b['top'],
-                              line=dict(width=0), fillcolor="gray", opacity=0.3, layer="below")
+                fig.add_shape(type="rect", x0=b['start'], x1=b['end'], y0=b['bottom'], y1=b['top'],
+                              line=dict(width=0), fillcolor="gray", opacity=0.3)
 
             # K線
             fig.add_trace(go.Candlestick(
