@@ -37,7 +37,6 @@ def fetch_data():
             stock = yf.download(sid_full, period="120d", progress=False)
             if stock.empty: continue
             
-            # 強制轉為一維資料，避免 MultiIndex 造成繪圖異常
             close_px = stock['Close'].squeeze()
             
             results.append({
@@ -93,7 +92,7 @@ else:
             fig.add_trace(go.Scatter(x=df.index, y=item['ma_s'], line=dict(color='#0055CC', width=2)))
             fig.add_trace(go.Scatter(x=df.index, y=item['ma_l'], line=dict(color='#888888', width=1, dash='dot')))
 
-            # 強制清空版面設定的所有裝飾
+            # 強制清空版面設定的任何裝飾
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
                 xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=5, b=5),
