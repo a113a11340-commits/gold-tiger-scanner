@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-監控版")
+st.set_page_config(layout="wide", page_title="金虎南-均線監控版")
 
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
@@ -34,6 +34,7 @@ def run_scan():
 
     if not all_sids: return []
 
+    # 批次下載
     all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker')
     
     results = []
@@ -53,14 +54,17 @@ def run_scan():
             
             if stock.empty or 'Close' not in stock.columns: continue
 
-            # 計算均線
+            # --- 計算均線 ---
             name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
             s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
             l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
             s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else 20
             l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
+            
             stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
             stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
+
+            # (此處已完全移除所有箱型運算迴圈)
 
             latest_p = float(stock['Close'].iloc[-1])
             results.append({
@@ -103,12 +107,11 @@ else:
                 line=dict(width=1.2)
             ))
             
-            # 短/長均線
+            # 均線
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
 
-            # --- 已徹底移除 fig.add_shape 所有相關區塊 ---
-
+            # --- 佈局設定 (已確認無 add_shape) ---
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
                 xaxis_rangeslider_visible=False,
