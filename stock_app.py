@@ -8,57 +8,66 @@ import io
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
 
-MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
+# 設定試算表基礎網址與需要掃描的分頁 GID
+MY_SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
+SHEET_GIDS = ["0", "534437042", "1241939414"] 
 
 def run_scan():
-    base_url = MY_SHEET_URL.split('/edit')[0]
-    csv_url = f"{base_url}/export?format=csv&gid=0"
-    try:
-        res = requests.get(csv_url, timeout=15)
-        res.encoding = 'utf-8'
-        if res.status_code != 200: return []
-        raw_df = pd.read_csv(io.StringIO(res.text))
-    except Exception: return []
+    all_sids_info = [] # 用來儲存所有分頁抓到的股票資訊
+    sids_to_download = set() # 用來儲存去重後的代號，供一次性下載
 
-    # --- 建議 4 優化：先收集所有需要下載的代號 ---
-    temp_rows = []
-    all_sids = []
-    for i, row in raw_df.iterrows():
-        if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
-        sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
-        if sign == "": continue 
-        
-        sid_raw = str(row.iloc[0]).split('.')[0].strip()
-        sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
-        all_sids.append(sid_full)
-        temp_rows.append({'sid_full': sid_full, 'row': row, 'sign': sign})
+    # 遍歷所有分頁抓取代號
+    for gid in SHEET_GIDS:
+        csv_url = f"{MY_SHEET_BASE}/export?format=csv&gid={gid}"
+        try:
+            res = requests.get(csv_url, timeout=15)
+            res.encoding = 'utf-8'
+            if res.status_code != 200: continue
+            raw_df = pd.read_csv(io.StringIO(res.text))
+            
+            for i, row in raw_df.iterrows():
+                # 判斷第一欄是否有代號
+                if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
+                
+                # 核心過濾：只要 F 欄位有字就監控
+                sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+                if sign == "": continue 
+                
+                sid_raw = str(row.iloc[0]).split('.')[0].strip()
+                sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
+                
+                sids_to_download.add(sid_full)
+                all_sids_info.append({
+                    "sid_full": sid_full,
+                    "row": row,
+                    "sign": sign
+                })
+        except Exception:
+            continue
 
-    if not all_sids: return []
+    if not sids_to_download: return []
 
-    # --- 建議 4 & 1：一次性下載並處理 MultiIndex ---
-    # 使用 threads=True 加速，auto_adjust 確保欄位一致
-    all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker')
-    
+    # --- 執行批量下載 (避免超過使用限制) ---
+    all_data = yf.download(list(sids_to_download), period="120d", progress=False, group_by='ticker')
+
     results = []
-    for item in temp_rows:
+    for item in all_sids_info:
         try:
             sid_full = item['sid_full']
-            row = item['row']
-            sign = item['sign']
-            
-            # 針對單檔或多檔下載的情況處理 DataFrame
-            if len(all_sids) > 1:
+            # 處理單檔與多檔下載時的資料結構差異
+            if len(sids_to_download) > 1:
                 stock = all_data[sid_full].copy()
             else:
                 stock = all_data.copy()
-            
-            # 建議 1：確保索引平坦化，移除可能存在的多層索引
+
+            # 解決 MultiIndex 問題，確保 Close 欄位可讀取
             if isinstance(stock.columns, pd.MultiIndex):
                 stock.columns = stock.columns.get_level_values(0)
             
-            if stock.empty or 'Close' not in stock.columns: continue
+            if stock.empty: continue
 
             # 原有邏輯：計算均線
+            row = item['row']
             name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
             s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
             l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
@@ -67,7 +76,7 @@ def run_scan():
             stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
             stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
             
-            # 原有邏輯：尋找箱型
+            # 原有邏輯：尋找最近箱型
             view_df = stock.tail(42)
             best_box = None
             idx = 0
@@ -88,28 +97,29 @@ def run_scan():
             latest_p = float(stock['Close'].iloc[-1])
             results.append({
                 "sid": sid_full, "name": name, "price": latest_p,
-                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
+                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": item['sign'], "df": stock,
                 "box": best_box 
             })
-        except Exception: continue
+        except Exception:
+            continue
     return results
 
 # --- 2. 呈現介面 ---
 if "data" not in st.session_state:
-    with st.spinner('讀取訊號中...'):
+    with st.spinner('讀取多分頁訊號中...'):
         st.session_state["data"] = run_scan()
 
 data_list = st.session_state.get("data", [])
 
 col_t, col_b = st.columns([8, 2])
-with col_t: st.subheader("🐯 金虎南-訊號監控")
+with col_t: st.subheader("🐯 金虎南-全方位監控")
 with col_b:
     if st.button("🔄 刷新"):
         del st.session_state["data"]
         st.rerun()
 
 if not data_list:
-    st.info("試算表 F 欄位目前無訊號標註。")
+    st.info("所選分頁的 F 欄位目前皆無訊號標註。")
 else:
     for item in data_list:
         df = item['df']
@@ -119,20 +129,11 @@ else:
         with st.expander(header, expanded=True):
             fig = go.Figure()
             
-            # --- 建議 2：箱型區間視覺延展 ---
+            # 畫灰色小框 (視覺優化：延伸至最新 K 棒並置於底層)
             if item['box']:
                 b = item['box']
-                fig.add_shape(
-                    type="rect", 
-                    x0=b['start'], 
-                    x1=df.index[-1], # 修改邏輯：延伸到最新一根 K 棒
-                    y0=b['bottom'], 
-                    y1=b['top'],
-                    line=dict(width=0), 
-                    fillcolor="gray", 
-                    opacity=0.3,
-                    layer="below"    # 確保不會蓋住 K 線
-                )
+                fig.add_shape(type="rect", x0=b['start'], x1=df.index[-1], y0=b['bottom'], y1=b['top'],
+                              line=dict(width=0), fillcolor="gray", opacity=0.3, layer="below")
 
             # K線
             fig.add_trace(go.Candlestick(
