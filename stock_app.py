@@ -34,7 +34,6 @@ def run_scan():
                 sid_raw = str(row.iloc[0]).split('.')[0].strip()
                 sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
                 
-                # 收集所有代號與對應資訊
                 all_temp_rows.append({'sid_full': sid_full, 'row': row, 'sign': sign})
                 if sid_full not in all_sids:
                     all_sids.append(sid_full)
@@ -43,7 +42,7 @@ def run_scan():
 
     if not all_sids: return []
 
-    # --- 2. 一次性批量下載 (即時讀取，不使用 cache) ---
+    # --- 2. 一次性批量下載 (即時讀取) ---
     all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker', threads=True)
     
     results = []
@@ -53,7 +52,6 @@ def run_scan():
             row = item['row']
             sign = item['sign']
             
-            # 針對單檔或多檔下載的情況處理 DataFrame
             if len(all_sids) > 1:
                 stock = all_data[sid_full].copy()
             else:
@@ -64,7 +62,6 @@ def run_scan():
             
             if stock.empty or 'Close' not in stock.columns: continue
 
-            # 原有邏輯：計算均線
             name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
             s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
             l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
@@ -73,7 +70,6 @@ def run_scan():
             stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
             stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
             
-            # 原有邏輯：尋找箱型
             view_df = stock.tail(42)
             best_box = None
             idx = 0
@@ -108,7 +104,7 @@ if "data" not in st.session_state:
 data_list = st.session_state.get("data", [])
 
 col_t, col_b = st.columns([8, 2])
-with col_t: st.subheader("🐯 金虎南-訊號監控 (多分頁即時版)")
+with col_t: st.subheader("🐯 金虎南-訊號監控")
 with col_b:
     if st.button("🔄 刷新"):
         del st.session_state["data"]
@@ -125,13 +121,13 @@ else:
         with st.expander(header, expanded=True):
             fig = go.Figure()
             
-            # 箱型區間視覺延展
+            # --- 修正處：將 x1 改回 b['end']，不再延伸到最新一根 K 棒 ---
             if item['box']:
                 b = item['box']
                 fig.add_shape(
                     type="rect", 
                     x0=b['start'], 
-                    x1=df.index[-1],
+                    x1=b['end'],    # 這裡改回箱型的結束點
                     y0=b['bottom'], 
                     y1=b['top'],
                     line=dict(width=0), 
@@ -140,7 +136,6 @@ else:
                     layer="below" 
                 )
 
-            # K線
             fig.add_trace(go.Candlestick(
                 x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                 increasing_line_color='#E63946', increasing_fillcolor='#E63946',
@@ -148,7 +143,6 @@ else:
                 line=dict(width=1.2)
             ))
             
-            # 短/長均線
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
 
