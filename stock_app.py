@@ -8,16 +8,13 @@ import io
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
 
-# 你的試算表基礎連結
 BASE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-# 三個分頁的 GID
 GIDS = ["0", "1241939414", "534437042"]
 
 def run_scan():
     all_temp_rows = []
     all_sids = []
 
-    # --- 1. 遍歷所有分頁抓取代號 ---
     for gid in GIDS:
         csv_url = f"{BASE_SHEET_URL}/export?format=csv&gid={gid}"
         try:
@@ -34,64 +31,64 @@ def run_scan():
                 sid_raw = str(row.iloc[0]).split('.')[0].strip()
                 sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
                 
-                all_temp_rows.append({'sid_full': sid_full, 'row': row, 'sign': sign})
+                # 儲存資訊，並帶上 gid 標記防止重複 key 問題
+                all_temp_rows.append({'sid_full': sid_full, 'row': row, 'sign': sign, 'gid': gid})
                 if sid_full not in all_sids:
                     all_sids.append(sid_full)
-        except Exception:
-            continue
+        except Exception: continue
 
     if not all_sids: return []
 
-    # --- 2. 一次性批量下載 (即時讀取) ---
     all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker', threads=True)
     
     results = []
     for item in all_temp_rows:
         try:
             sid_full = item['sid_full']
-            row = item['row']
-            sign = item['sign']
+            row, sign, gid = item['row'], item['sign'], item['gid']
             
-            if len(all_sids) > 1:
-                stock = all_data[sid_full].copy()
-            else:
-                stock = all_data.copy()
-            
+            stock = all_data[sid_full].copy() if len(all_sids) > 1 else all_data.copy()
             if isinstance(stock.columns, pd.MultiIndex):
                 stock.columns = stock.columns.get_level_values(0)
-            
             if stock.empty or 'Close' not in stock.columns: continue
 
+            # 指標計算
             name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
-            s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
-            l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
-            s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else 20
-            l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
+            s_ma_val = int(pd.to_numeric(row.iloc[2], errors='coerce') or 20)
+            l_ma_val = int(pd.to_numeric(row.iloc[3], errors='coerce') or 60)
             stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
             stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
             
+            # 箱型偵測邏輯（優先實體，多點則影線）
             view_df = stock.tail(42)
             best_box = None
             idx = 0
             while idx < len(view_df) - 2:
                 w = view_df.iloc[idx:idx+3]
-                w_max, w_min = w['High'].max(), w['Low'].min()
-                if (w_max - w_min) / w_min <= 0.03:
+                # 取得實體的高低
+                w_body_max = w[['Open', 'Close']].max(axis=1).max()
+                w_body_min = w[['Open', 'Close']].min(axis=1).min()
+                # 取得影線的高低
+                w_shadow_max, w_shadow_min = w['High'].max(), w['Low'].min()
+                
+                # 判斷共振（如果影線多次觸碰邊界，改採影線）
+                top = w_shadow_max if (w['High'] >= w_shadow_max * 0.998).sum() >= 2 else w_body_max
+                bottom = w_shadow_min if (w['Low'] <= w_shadow_min * 1.002).sum() >= 2 else w_body_min
+
+                if (top - bottom) / bottom <= 0.035:
                     start_i = idx
                     while idx < len(view_df) - 1:
                         nr = view_df.iloc[idx+1]
-                        if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
+                        # 檢查下一根是否仍在區間內
+                        if nr['Low'] >= bottom * 0.985 and nr['High'] <= top * 1.015:
                             idx += 1
-                        else:
-                            break
-                    best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
+                        else: break
+                    best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': top, 'bottom': bottom}
                 idx += 1
 
-            latest_p = float(stock['Close'].iloc[-1])
             results.append({
-                "sid": sid_full, "name": name, "price": latest_p,
-                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
-                "box": best_box 
+                "sid": sid_full, "name": name, "price": float(stock['Close'].iloc[-1]),
+                "sign": sign, "df": stock, "box": best_box, "gid": gid
             })
         except Exception: continue
     return results
@@ -111,29 +108,21 @@ with col_b:
         st.rerun()
 
 if not data_list:
-    st.info("所選分頁的 F 欄位目前無訊號標註。")
+    st.info("目前無訊號。")
 else:
-    for item in data_list:
+    for i, item in enumerate(data_list):
         df = item['df']
         total_len = len(df)
         header = f"{item['sid']} {item['name']} ({item['price']:.2f}) ➔ {item['sign']}"
         
+        # 修正 DuplicateElementId：加上 unique key
         with st.expander(header, expanded=True):
             fig = go.Figure()
-            
-            # --- 修正處：將 x1 改回 b['end']，不再延伸到最新一根 K 棒 ---
             if item['box']:
                 b = item['box']
                 fig.add_shape(
-                    type="rect", 
-                    x0=b['start'], 
-                    x1=b['end'],    # 這裡改回箱型的結束點
-                    y0=b['bottom'], 
-                    y1=b['top'],
-                    line=dict(width=0), 
-                    fillcolor="gray", 
-                    opacity=0.3,
-                    layer="below" 
+                    type="rect", x0=b['start'], x1=b['end'], y0=b['bottom'], y1=b['top'],
+                    line=dict(width=0), fillcolor="gray", opacity=0.3, layer="below" 
                 )
 
             fig.add_trace(go.Candlestick(
@@ -143,15 +132,15 @@ else:
                 line=dict(width=1.2)
             ))
             
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5)))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot')))
 
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
-                xaxis_rangeslider_visible=False,
-                margin=dict(l=5, r=5, t=5, b=5),
-                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
-                yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
+                xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=5, b=5),
+                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False),
+                yaxis=dict(side='right', tickfont=dict(size=11)),
                 hovermode=False
             )
-            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False})
+            # 使用 enumerate 的 i 確保每個圖表 key 唯一
+            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False}, key=f"plot_{item['sid']}_{item['gid']}_{i}")
