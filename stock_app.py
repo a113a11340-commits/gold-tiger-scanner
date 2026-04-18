@@ -6,146 +6,158 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-突破跌破預警版")
+st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
 
-MY_SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-SHEET_GIDS = ["0", "534437042", "1241939414"] 
-
-def get_dynamic_levels(df_slice):
-    """ 動態計算箱型上下限：紅K收盤頂 & 綠K收盤底 """
-    red_candles = df_slice[df_slice['Close'] >= df_slice['Open']]
-    green_candles = df_slice[df_slice['Close'] < df_slice['Open']]
-    top = red_candles['Close'].max() if not red_candles.empty else df_slice['High'].max()
-    bottom = green_candles['Close'].min() if not green_candles.empty else df_slice['Low'].min()
-    
-    # 價格共振檢查 (3次觸碰)
-    all_prices = pd.concat([df_slice['High'], df_slice['Low'], df_slice['Close']])
-    counts = all_prices.value_counts()
-    for price, count in counts.items():
-        if count >= 3:
-            if price > top: top = price
-            if price < bottom: bottom = price
-    return float(top), float(bottom)
+# 你的試算表基礎連結
+BASE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
+# 三個分頁的 GID
+GIDS = ["0", "1241939414", "534437042"]
 
 def run_scan():
-    all_sids_info = [] 
-    sids_to_download = set() 
-    clean_base = MY_SHEET_BASE.split('/edit')[0]
+    all_temp_rows = []
+    all_sids = []
 
-    for gid in SHEET_GIDS:
-        csv_url = f"{clean_base}/export?format=csv&gid={gid}"
+    # --- 1. 遍歷所有分頁抓取代號 ---
+    for gid in GIDS:
+        csv_url = f"{BASE_SHEET_URL}/export?format=csv&gid={gid}"
         try:
             res = requests.get(csv_url, timeout=15)
             res.encoding = 'utf-8'
             if res.status_code != 200: continue
             raw_df = pd.read_csv(io.StringIO(res.text))
+            
             for i, row in raw_df.iterrows():
                 if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue 
-                raw_sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
-                if raw_sign == "": continue 
+                sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+                if sign == "": continue 
+                
                 sid_raw = str(row.iloc[0]).split('.')[0].strip()
                 sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
-                sids_to_download.add(sid_full)
-                all_sids_info.append({
-                    "sid_full": sid_full, "name": row.iloc[1], "raw_sign": raw_sign,
-                    "s_ma_val": pd.to_numeric(row.iloc[2], errors='coerce'),
-                    "l_ma_val": pd.to_numeric(row.iloc[3], errors='coerce')
-                })
-        except Exception: continue
+                
+                # 收集所有代號與對應資訊
+                all_temp_rows.append({'sid_full': sid_full, 'row': row, 'sign': sign})
+                if sid_full not in all_sids:
+                    all_sids.append(sid_full)
+        except Exception:
+            continue
 
-    if not sids_to_download: return []
-    all_data = yf.download(list(sids_to_download), period="180d", progress=False, group_by='ticker')
+    if not all_sids: return []
 
+    # --- 2. 一次性批量下載 (即時讀取，不使用 cache) ---
+    all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker', threads=True)
+    
     results = []
-    for item in all_sids_info:
+    for item in all_temp_rows:
         try:
             sid_full = item['sid_full']
-            stock = all_data[sid_full].copy() if len(sids_to_download) > 1 else all_data.copy()
-            if isinstance(stock.columns, pd.MultiIndex): stock.columns = stock.columns.get_level_values(0)
-            stock = stock.dropna(subset=['Close', 'High', 'Low', 'Open'])
+            row = item['row']
+            sign = item['sign']
             
-            if pd.notna(item['s_ma_val']): stock['MA_S'] = stock['Close'].rolling(window=int(item['s_ma_val'])).mean()
-            if pd.notna(item['l_ma_val']): stock['MA_L'] = stock['Close'].rolling(window=int(item['l_ma_val'])).mean()
+            # 針對單檔或多檔下載的情況處理 DataFrame
+            if len(all_sids) > 1:
+                stock = all_data[sid_full].copy()
+            else:
+                stock = all_data.copy()
             
+            if isinstance(stock.columns, pd.MultiIndex):
+                stock.columns = stock.columns.get_level_values(0)
+            
+            if stock.empty or 'Close' not in stock.columns: continue
+
+            # 原有邏輯：計算均線
+            name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
+            s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
+            l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
+            s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else 20
+            l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else 60
+            stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
+            stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
+            
+            # 原有邏輯：尋找箱型
             view_df = stock.tail(42)
             best_box = None
-            tag = ""
-            
-            if 'MA_S' in stock.columns:
-                # 尋找最近的箱型起點
-                for idx in range(len(view_df) - 3, -1, -1):
-                    w_init = view_df.iloc[idx:idx+3]
-                    if all(w_init['Low'].iloc[j] <= w_init['MA_S'].iloc[j] <= w_init['High'].iloc[j] for j in range(3)):
-                        start_idx = idx
-                        end_idx = idx + 2
-                        
-                        # 向後生長並檢查突破/跌破
-                        for k in range(idx + 3, len(view_df)):
-                            current_k = view_df.iloc[k]
-                            temp_top, temp_bottom = get_dynamic_levels(view_df.iloc[start_idx : k])
-                            
-                            # 檢查目前 K 棒收盤是否還在箱型內
-                            if current_k['Close'] > temp_top or current_k['Close'] < temp_bottom:
-                                break
-                            
-                            # 且需滿足觸碰均線才延伸
-                            if current_k['Low'] <= current_k['MA_S'] <= current_k['High']:
-                                end_idx = k
-                            else:
-                                break
-                        
-                        final_box_df = view_df.iloc[start_idx : end_idx + 1]
-                        top, bottom = get_dynamic_levels(final_box_df)
-                        height_pct = (top - bottom) / bottom * 100
-                        
-                        # --- 突破/跌破 提示判斷 ---
-                        latest_close = float(stock['Close'].iloc[-1])
-                        if latest_close > top:
-                            tag = f" 🚩[突破箱型! 頂:{top:.1f}]"
-                        elif latest_close < bottom:
-                            tag = f" ⚠️[跌破警告! 底:{bottom:.1f}]"
+            idx = 0
+            while idx < len(view_df) - 2:
+                w = view_df.iloc[idx:idx+3]
+                w_max, w_min = w['High'].max(), w['Low'].min()
+                if (w_max - w_min) / w_min <= 0.03:
+                    start_i = idx
+                    while idx < len(view_df) - 1:
+                        nr = view_df.iloc[idx+1]
+                        if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
+                            idx += 1
                         else:
-                            # 還在箱型內，顯示壓縮狀態
-                            if height_pct <= 2.5: tag = f" ⚡[極壓:{height_pct:.1f}%]"
-                            elif height_pct <= 4.5: tag = f" 🎯[黃金:{height_pct:.1f}%]"
-                            else: tag = f" 📦[盤整:{height_pct:.1f}%]"
-                        
-                        best_box = {'start': view_df.index[start_idx], 'end': view_df.index[end_idx], 'top': top, 'bottom': bottom}
-                        break 
+                            break
+                    best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
+                idx += 1
 
+            latest_p = float(stock['Close'].iloc[-1])
             results.append({
-                "sid": sid_full, "name": item['name'], "price": float(stock['Close'].iloc[-1]),
-                "display_sign": item['raw_sign'] + tag, "df": stock, "box": best_box,
-                "has_ma_s": 'MA_S' in stock.columns, "has_ma_l": 'MA_L' in stock.columns
+                "sid": sid_full, "name": name, "price": latest_p,
+                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock,
+                "box": best_box 
             })
         except Exception: continue
     return results
 
-# --- UI ---
+# --- 2. 呈現介面 ---
 if "data" not in st.session_state:
-    with st.spinner('計算箱型動態訊號中...'): st.session_state["data"] = run_scan()
+    with st.spinner('讀取即時訊號中...'):
+        st.session_state["data"] = run_scan()
 
-for i, item in enumerate(st.session_state.get("data", [])):
-    df = item['df']
-    # 如果是突破或跌破，標題顏色或文字會更明顯
-    header_text = f"{item['sid']} {item['name']} ({item['price']:.2f}) ➔ {item['display_sign']}"
-    
-    with st.expander(header_text, expanded=True):
-        fig = go.Figure()
-        if item['box']:
-            b = item['box']
-            fig.add_shape(type="rect", x0=b['start'], x1=b['end'], y0=b['bottom'], y1=b['top'],
-                          line=dict(width=0), fillcolor="gray", opacity=0.3)
+data_list = st.session_state.get("data", [])
 
-        fig.add_trace(go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-            increasing_line_color='#8B0000', increasing_fillcolor='#8B0000', 
-            decreasing_line_color='#004400', decreasing_fillcolor='#004400', name="K線"
-        ))
-        if item['has_ma_s']: fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0044BB', width=2)))
-        if item['has_ma_l']: fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#777777', width=1.5, dash='dot'), connectgaps=True))
+col_t, col_b = st.columns([8, 2])
+with col_t: st.subheader("🐯 金虎南-訊號監控 (多分頁即時版)")
+with col_b:
+    if st.button("🔄 刷新"):
+        del st.session_state["data"]
+        st.rerun()
 
-        fig.update_layout(height=380, showlegend=False, template="plotly_white", xaxis_rangeslider_visible=False,
-                          margin=dict(l=5, r=5, t=5, b=5), xaxis=dict(type='category', range=[len(df)-42, len(df)-0.5], showticklabels=False),
-                          yaxis=dict(side='right', fixedrange=True))
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False}, key=f"v_alert_{item['sid']}_{i}")
+if not data_list:
+    st.info("所選分頁的 F 欄位目前無訊號標註。")
+else:
+    for item in data_list:
+        df = item['df']
+        total_len = len(df)
+        header = f"{item['sid']} {item['name']} ({item['price']:.2f}) ➔ {item['sign']}"
+        
+        with st.expander(header, expanded=True):
+            fig = go.Figure()
+            
+            # 箱型區間視覺延展
+            if item['box']:
+                b = item['box']
+                fig.add_shape(
+                    type="rect", 
+                    x0=b['start'], 
+                    x1=df.index[-1],
+                    y0=b['bottom'], 
+                    y1=b['top'],
+                    line=dict(width=0), 
+                    fillcolor="gray", 
+                    opacity=0.3,
+                    layer="below" 
+                )
+
+            # K線
+            fig.add_trace(go.Candlestick(
+                x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                increasing_line_color='#E63946', increasing_fillcolor='#E63946',
+                decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F',
+                line=dict(width=1.2)
+            ))
+            
+            # 短/長均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
+
+            fig.update_layout(
+                height=380, showlegend=False, template="plotly_white",
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=5, r=5, t=5, b=5),
+                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
+                yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
+                hovermode=False
+            )
+            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False})
