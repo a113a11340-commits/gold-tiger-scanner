@@ -107,6 +107,8 @@ else:
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
             fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
 
+            # --- 已徹底移除 fig.add_shape 所有相關區塊 ---
+
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
                 xaxis_rangeslider_visible=False,
