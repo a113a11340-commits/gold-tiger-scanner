@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-均線監控版")
+st.set_page_config(layout="wide", page_title="金虎南-監控版")
 
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
@@ -34,7 +34,6 @@ def run_scan():
 
     if not all_sids: return []
 
-    # 批次下載
     all_data = yf.download(all_sids, period="120d", progress=False, group_by='ticker')
     
     results = []
@@ -54,7 +53,7 @@ def run_scan():
             
             if stock.empty or 'Close' not in stock.columns: continue
 
-            # --- 計算均線 ---
+            # --- 僅計算均線邏輯 ---
             name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
             s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
             l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
@@ -64,12 +63,12 @@ def run_scan():
             stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
             stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
 
-            # (此處已完全移除所有箱型運算迴圈)
+            # --- ！！！這裡原本的箱型運算 while 迴圈已完全移除 ！！！ ---
 
             latest_p = float(stock['Close'].iloc[-1])
             results.append({
                 "sid": sid_full, "name": name, "price": latest_p,
-                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock
+                "sign": sign, "df": stock
             })
         except Exception: continue
     return results
@@ -99,25 +98,34 @@ else:
         with st.expander(header, expanded=True):
             fig = go.Figure()
 
-            # K線
+            # 1. K線
             fig.add_trace(go.Candlestick(
-                x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+                x=df.index, 
+                open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                 increasing_line_color='#E63946', increasing_fillcolor='#E63946',
-                decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F',
-                line=dict(width=1.2)
+                decreasing_line_color='#2A9D8F', decreasing_fillcolor='#2A9D8F'
             ))
             
-            # 均線
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5), name="短均"))
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot'), name="長均"))
+            # 2. 短均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], 
+                                     line=dict(color='#0055CC', width=2.5)))
+            
+            # 3. 長均線
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], 
+                                     line=dict(color='#888888', width=1, dash='dot')))
 
-            # --- 佈局設定 (已確認無 add_shape) ---
+            # --- 佈局：徹底清除所有裝飾性元素 ---
             fig.update_layout(
-                height=380, showlegend=False, template="plotly_white",
+                height=380, 
+                showlegend=False, 
+                template="plotly_white",
                 xaxis_rangeslider_visible=False,
                 margin=dict(l=5, r=5, t=5, b=5),
-                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
-                yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
-                hovermode=False
+                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False),
+                yaxis=dict(side='right', tickfont=dict(size=11)),
+                hovermode=False,
+                shapes=[],      # 確保畫面上絕對不會有任何矩形或線條
+                annotations=[]  # 確保不會有任何文字註解
             )
+            
             st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False})
