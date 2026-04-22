@@ -4,7 +4,6 @@ import pandas as pd
 import yfinance as yf
 import requests
 import io
-import time
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
@@ -12,64 +11,60 @@ st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
 MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
 
 def run_scan():
-    # A. 先讀取一次試算表，拿到所有要監控的代碼清單
     base_url = MY_SHEET_URL.split('/edit')[0]
     csv_url = f"{base_url}/export?format=csv&gid=0"
-    
     try:
         res = requests.get(csv_url, timeout=15)
         res.encoding = 'utf-8'
+        if res.status_code != 200: return []
         raw_df = pd.read_csv(io.StringIO(res.text))
     except Exception: return []
 
-    all_symbols = []
+    symbol_list = []
+    row_map = {}
     for i, row in raw_df.iterrows():
         if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue
         sid_raw = str(row.iloc[0]).split('.')[0].strip()
         sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
-        all_symbols.append(sid_full)
+        symbol_list.append(sid_full)
+        row_map[sid_full] = row
 
-    if not all_symbols: return []
+    if not symbol_list: return []
 
-    # B. 【核心優化：一次性請求所有 API】
-    # 這樣下載速度最快，資料會直接存在記憶體中
-    all_stock_data = yf.download(all_symbols, period="120d", progress=False, group_by='ticker', threads=True)
-
-    # C. 重新讀取一次試算表 (確保雲端公式已經根據最新資料跑完結果)
-    # 註：如果你的 F 欄位是根據 yfinance 即時連動，這步最重要
-    try:
-        res = requests.get(csv_url, timeout=15)
-        res.encoding = 'utf-8'
-        final_df = pd.read_csv(io.StringIO(res.text))
-    except Exception: return []
+    # 一次性請求所有 API
+    all_data = yf.download(symbol_list, period="120d", progress=False, group_by='ticker', threads=True)
 
     results = []
-    for i, row in final_df.iterrows():
+    for sid_full in symbol_list:
         try:
-            # 檢查 F 欄位：只有雲端算好「有訊號」的才處理
+            if len(symbol_list) > 1:
+                stock = all_data[sid_full].copy()
+            else:
+                stock = all_data.copy()
+            
+            if stock.empty or stock['Close'].isnull().all(): continue
+            if isinstance(stock.columns, pd.MultiIndex):
+                stock.columns = stock.columns.get_level_values(0)
+
+            row = row_map[sid_full]
             sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
             if sign == "": continue 
             
-            sid_raw = str(row.iloc[0]).split('.')[0].strip()
-            sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
+            name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
             
-            # 從記憶體中提取剛才下載好的資料
-            if len(all_symbols) > 1:
-                stock = all_stock_data[sid_full].copy()
-            else:
-                stock = all_stock_data.copy()
-
-            if stock.empty or isinstance(stock.columns, pd.MultiIndex):
-                stock.columns = stock.columns.get_level_values(0)
-
-            # 均線週期 (從試算表讀取)
-            s_ma_val = int(pd.to_numeric(row.iloc[2], errors='coerce')) if pd.notna(row.iloc[2]) else 20
-            l_ma_val = int(pd.to_numeric(row.iloc[3], errors='coerce')) if pd.notna(row.iloc[3]) else 60
+            # --- 修正：完全不加預設值，空白就是 None ---
+            s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
+            l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
             
-            stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
-            stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
+            s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else None
+            l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else None
 
-            # --- 自動尋找區間邏輯 (完全不動) ---
+            if s_ma_val:
+                stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
+            if l_ma_val:
+                stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
+
+            # 箱型區間邏輯
             view_df = stock.tail(42)
             best_box = None
             idx = 0
@@ -88,15 +83,15 @@ def run_scan():
                 idx += 1
 
             results.append({
-                "sid": sid_full, "name": row.iloc[1], "price": float(stock['Close'].iloc[-1]),
+                "sid": sid_full, "name": name, "price": float(stock['Close'].iloc[-1]),
                 "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock, "box": best_box
             })
-        except: continue
+        except Exception: continue
     return results
 
-# --- 2. 呈現介面 (視覺完全不動) ---
+# --- 2. 呈現介面 ---
 if "data" not in st.session_state:
-    with st.spinner('雲端計算中，請稍候...'):
+    with st.spinner('讀取訊號中...'):
         st.session_state["data"] = run_scan()
 
 data_list = st.session_state.get("data", [])
@@ -109,7 +104,7 @@ with col_b:
         st.rerun()
 
 if not data_list:
-    st.info("目前雲端試算表尚無觸發訊號。")
+    st.info("試算表 F 欄位目前無訊號標註。")
 else:
     for item in data_list:
         df = item['df']
@@ -130,8 +125,12 @@ else:
                 line=dict(width=1.2)
             ))
             
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5)))
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot')))
+            # --- 修正：只有在有設定數值時才畫線 ---
+            if item['s_ma_p'] and 'MA_S' in df.columns:
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5)))
+            
+            if item['l_ma_p'] and 'MA_L' in df.columns:
+                fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot')))
 
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
