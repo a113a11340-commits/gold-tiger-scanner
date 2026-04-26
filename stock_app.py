@@ -6,7 +6,7 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-全自動監控")
+st.set_page_config(layout="wide", page_title="金虎南-精密訊號監控")
 
 # 這裡請確認你的網址與分頁 GID 是否正確
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
@@ -42,6 +42,7 @@ def run_scan():
 
     # --- 步驟 2: 批次下載數據 ---
     tickers = list(set([t['sid'] for t in all_targets]))
+    # 抓取 120 天數據以確保均線計算正確
     full_data = yf.download(tickers, period="120d", progress=False, group_by='ticker')
 
     results = []
@@ -58,8 +59,9 @@ def run_scan():
                 stock['MA_S'] = stock['Close'].rolling(window=s_day).mean()
                 stock['MA_L'] = stock['Close'].rolling(window=l_day).mean()
                 
-                # --- 均線精密數據與趨勢監控 (核心邏輯植入) ---
+                # --- 均線精密數據與過濾邏輯 ---
                 curr_p = float(stock['Close'].iloc[-1])
+                prev_p = float(stock['Close'].iloc[-2])
                 ma_s = stock['MA_S']
                 
                 if pd.isna(ma_s.iloc[-1]) or pd.isna(ma_s.iloc[-2]): continue
@@ -67,16 +69,22 @@ def run_scan():
                 curr_ma_s = float(ma_s.iloc[-1])
                 prev_ma_s = float(ma_s.iloc[-2])
                 
+                # --- 核心過濾：只抓「突破」或「跌破」的瞬間 ---
+                is_break_above = (prev_p <= prev_ma_s) and (curr_p > curr_ma_s)
+                is_break_below = (prev_p >= prev_ma_s) and (curr_p < curr_ma_s)
+                
+                # 若無訊號則跳過，不存入結果清單
+                if not (is_break_above or is_break_below):
+                    continue
+
                 # 1. 計算乖離率
                 bias = ((curr_p - curr_ma_s) / curr_ma_s) * 100
                 
                 # 2. 判定均線方向
                 ma_trend = "⤴️上揚" if curr_ma_s > prev_ma_s else "⤵️下彎"
                 
-                # 3. 決定狀態與圖示
-                sign_icon = "🚀 站上" if curr_p > curr_ma_s else "📉 跌破"
-                
-                # 4. 組合精密資訊字串
+                # 3. 決定狀態字串
+                sign_icon = "🚀 剛突破" if is_break_above else "🚨 剛跌破"
                 status = (
                     f"{sign_icon} {s_day}MA ({ma_trend}) | "
                     f"現價: {curr_p:.2f} | "
@@ -108,21 +116,22 @@ def run_scan():
 
 # --- 3. 介面呈現 ---
 if "data" not in st.session_state:
-    with st.spinner('AI 正在自動篩選標的中...'):
+    with st.spinner('正在掃描具備進出訊號的標的...'):
         st.session_state["data"] = run_scan()
 
 data_list = st.session_state.get("data", [])
 
 col_t, col_b = st.columns([8, 2])
-with col_t: st.subheader("🐯 金虎南-精密均線監控")
+with col_t: st.subheader("🐯 金虎南-精密訊號過濾系統")
 with col_b:
-    if st.button("🔄 重新掃描"):
+    if st.button("🔄 重新掃描訊號"):
         del st.session_state["data"]
         st.rerun()
 
 if not data_list:
-    st.info("目前清單中沒有標的符合均線條件。")
+    st.success("目前所有監控標的均在趨勢中，尚無「剛突破」或「剛跌破」的即時訊號。")
 else:
+    st.warning(f"偵測到 {len(data_list)} 檔標的出現進出訊號！")
     for i, item in enumerate(data_list):
         df = item['df']
         t_len = len(df)
@@ -142,8 +151,8 @@ else:
                 line=dict(width=1.2)
             ))
             
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5)))
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot')))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], name="短期均線", line=dict(color='#0055CC', width=2.5)))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], name="長期均線", line=dict(color='#888888', width=1, dash='dot')))
 
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
@@ -152,4 +161,4 @@ else:
                 yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
                 hovermode=False
             )
-            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True, 'displayModeBar': False}, key=f"ch_{item['sid']}_{i}")
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False}, key=f"ch_{item['sid']}_{i}")
