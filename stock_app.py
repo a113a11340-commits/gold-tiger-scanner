@@ -25,7 +25,6 @@ def run_scan():
             raw_df = pd.read_csv(io.StringIO(res.text))
             
             for _, row in raw_df.iterrows():
-                # 只要 A 欄（代號）有東西就抓
                 if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue
                 
                 sid_raw = str(row.iloc[0]).split('.')[0].strip()
@@ -59,18 +58,33 @@ def run_scan():
                 stock['MA_S'] = stock['Close'].rolling(window=s_day).mean()
                 stock['MA_L'] = stock['Close'].rolling(window=l_day).mean()
                 
-                # --- 自動邏輯判斷 ---
+                # --- 均線精密數據與趨勢監控 (核心邏輯植入) ---
                 curr_p = float(stock['Close'].iloc[-1])
-                ma_s_p = float(stock['MA_S'].iloc[-1])
+                ma_s = stock['MA_S']
                 
-                if curr_p > ma_s_p:
-                    status = f"🚀 站上 {s_day}MA"
-                elif curr_p < ma_s_p:
-                    status = f"📉 跌破 {s_day}MA"
-                else:
-                    continue # 若平盤或無資料則跳過
+                if pd.isna(ma_s.iloc[-1]) or pd.isna(ma_s.iloc[-2]): continue
                 
-                # --- 箱型演算法 (精確截止版) ---
+                curr_ma_s = float(ma_s.iloc[-1])
+                prev_ma_s = float(ma_s.iloc[-2])
+                
+                # 1. 計算乖離率
+                bias = ((curr_p - curr_ma_s) / curr_ma_s) * 100
+                
+                # 2. 判定均線方向
+                ma_trend = "⤴️上揚" if curr_ma_s > prev_ma_s else "⤵️下彎"
+                
+                # 3. 決定狀態與圖示
+                sign_icon = "🚀 站上" if curr_p > curr_ma_s else "📉 跌破"
+                
+                # 4. 組合精密資訊字串
+                status = (
+                    f"{sign_icon} {s_day}MA ({ma_trend}) | "
+                    f"現價: {curr_p:.2f} | "
+                    f"{s_day}MA價: {curr_ma_s:.2f} | "
+                    f"乖離: {bias:.2f}%"
+                )
+                
+                # --- 箱型演算法 ---
                 view_df = stock.tail(42)
                 best_box = None
                 idx = 0
@@ -100,26 +114,26 @@ if "data" not in st.session_state:
 data_list = st.session_state.get("data", [])
 
 col_t, col_b = st.columns([8, 2])
-with col_t: st.subheader("🐯 金虎南-AI 自動偵測")
+with col_t: st.subheader("🐯 金虎南-精密均線監控")
 with col_b:
     if st.button("🔄 重新掃描"):
         del st.session_state["data"]
         st.rerun()
 
 if not data_list:
-    st.info("目前清單中沒有標的符合均線連動條件。")
+    st.info("目前清單中沒有標的符合均線條件。")
 else:
     for i, item in enumerate(data_list):
         df = item['df']
         t_len = len(df)
-        header = f"{item['sid']} {item['name']} ({item['price']:.2f}) ➔ {item['sign']}"
+        header = f"{item['sid']} {item['name']} ➔ {item['sign']}"
         
         with st.expander(header, expanded=True):
             fig = go.Figure()
             if item['box']:
                 b = item['box']
                 fig.add_shape(type="rect", x0=b['start'], x1=b['end'], y0=b['bottom'], y1=b['top'],
-                             line=dict(width=0), fillcolor="gray", opacity=0.3)
+                               line=dict(width=0), fillcolor="gray", opacity=0.3)
 
             fig.add_trace(go.Candlestick(
                 x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
