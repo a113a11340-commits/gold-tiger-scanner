@@ -6,109 +6,105 @@ import requests
 import io
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-區間監控版")
+st.set_page_config(layout="wide", page_title="金虎南-多頁批次版")
 
-MY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1jpJTJdrFSVcZowBnkgRwf55sumE_LS4q_eQk8YOpA24/edit"
+# 設定多個 GID 來源
+SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
+GIDS = ["0", "1241939414", "534437042"]
 
 def run_scan():
-    base_url = MY_SHEET_URL.split('/edit')[0]
-    csv_url = f"{base_url}/export?format=csv&gid=0"
-    try:
-        res = requests.get(csv_url, timeout=15)
-        res.encoding = 'utf-8'
-        if res.status_code != 200: return []
-        raw_df = pd.read_csv(io.StringIO(res.text))
-    except Exception: return []
+    all_targets = []
+    
+    # --- 步驟 1: 掃描所有分頁獲取標的清單 ---
+    for gid in GIDS:
+        csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}"
+        try:
+            res = requests.get(csv_url, timeout=10)
+            res.encoding = 'utf-8'
+            if res.status_code != 200: continue
+            raw_df = pd.read_csv(io.StringIO(res.text))
+            
+            for _, row in raw_df.iterrows():
+                if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue
+                sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
+                if sign == "": continue # 只抓 F 欄有字的
+                
+                sid_raw = str(row.iloc[0]).split('.')[0].strip()
+                sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
+                
+                all_targets.append({
+                    "sid": sid_full,
+                    "name": row.iloc[1] if pd.notna(row.iloc[1]) else "未命名",
+                    "s_ma_p": pd.to_numeric(row.iloc[2], errors='coerce'),
+                    "l_ma_p": pd.to_numeric(row.iloc[3], errors='coerce'),
+                    "sign": sign
+                })
+        except Exception: continue
 
-    symbol_list = []
-    row_map = {}
-    for i, row in raw_df.iterrows():
-        if pd.isna(row.iloc[0]) or str(row.iloc[0]).strip() == "": continue
-        sid_raw = str(row.iloc[0]).split('.')[0].strip()
-        sid_full = f"{sid_raw}.TW" if len(sid_raw) == 4 else sid_raw
-        symbol_list.append(sid_full)
-        row_map[sid_full] = row
+    if not all_targets: return []
 
-    if not symbol_list: return []
-
-    # 一次性請求所有 API
-    all_data = yf.download(symbol_list, period="120d", progress=False, group_by='ticker', threads=True)
+    # --- 步驟 2: 批次下載所有標的數據 ---
+    tickers = [t['sid'] for t in all_targets]
+    # 使用 set 去重下載可節省流量，但我們保留 all_targets 的順序來呈現
+    full_data = yf.download(list(set(tickers)), period="120d", progress=False, group_by='ticker')
 
     results = []
-    for sid_full in symbol_list:
+    for item in all_targets:
         try:
-            if len(symbol_list) > 1:
-                stock = all_data[sid_full].copy()
-            else:
-                stock = all_data.copy()
+            sid = item['sid']
+            # 處理單檔與多檔下載時的數據結構差異
+            stock = full_data[sid].copy() if len(set(tickers)) > 1 else full_data.copy()
+            stock.dropna(subset=['Close'], inplace=True)
             
-            if stock.empty or stock['Close'].isnull().all(): continue
-            if isinstance(stock.columns, pd.MultiIndex):
-                stock.columns = stock.columns.get_level_values(0)
+            if not stock.empty:
+                # 均線運算
+                s_val = int(item['s_ma_p']) if pd.notna(item['s_ma_p']) else 20
+                l_val = int(item['l_ma_p']) if pd.notna(item['l_ma_p']) else 60
+                stock['MA_S'] = stock['Close'].rolling(window=s_val).mean()
+                stock['MA_L'] = stock['Close'].rolling(window=l_val).mean()
+                
+                # 箱型演算法 (保留原邏輯)
+                view_df = stock.tail(42)
+                best_box = None
+                idx = 0
+                while idx < len(view_df) - 2:
+                    w = view_df.iloc[idx:idx+3]
+                    w_max, w_min = w['High'].max(), w['Low'].min()
+                    if (w_max - w_min) / w_min <= 0.03:
+                        start_i = idx
+                        while idx < len(view_df) - 1:
+                            nr = view_df.iloc[idx+1]
+                            if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
+                                idx += 1
+                            else: break
+                        best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
+                    idx += 1
 
-            row = row_map[sid_full]
-            sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
-            if sign == "": continue 
-            
-            name = row.iloc[1] if pd.notna(row.iloc[1]) else "未命名"
-            
-            # --- 修正：完全不加預設值，空白就是 None ---
-            s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce') 
-            l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
-            
-            s_ma_val = int(s_ma_p) if pd.notna(s_ma_p) else None
-            l_ma_val = int(l_ma_p) if pd.notna(l_ma_p) else None
-
-            if s_ma_val:
-                stock['MA_S'] = stock['Close'].rolling(window=s_ma_val).mean()
-            if l_ma_val:
-                stock['MA_L'] = stock['Close'].rolling(window=l_ma_val).mean()
-
-            # 箱型區間邏輯
-            view_df = stock.tail(42)
-            best_box = None
-            idx = 0
-            while idx < len(view_df) - 2:
-                w = view_df.iloc[idx:idx+3]
-                w_max, w_min = w['High'].max(), w['Low'].min()
-                if (w_max - w_min) / w_min <= 0.03:
-                    start_i = idx
-                    while idx < len(view_df) - 1:
-                        nr = view_df.iloc[idx+1]
-                        if nr['Low'] >= w_min * 0.985 and nr['High'] <= w_max * 1.015:
-                            idx += 1
-                        else:
-                            break
-                    best_box = {'start': view_df.index[start_i], 'end': view_df.index[idx], 'top': w_max, 'bottom': w_min}
-                idx += 1
-
-            results.append({
-                "sid": sid_full, "name": name, "price": float(stock['Close'].iloc[-1]),
-                "s_ma_p": s_ma_val, "l_ma_p": l_ma_val, "sign": sign, "df": stock, "box": best_box
-            })
+                item.update({"price": float(stock['Close'].iloc[-1]), "df": stock, "box": best_box})
+                results.append(item)
         except Exception: continue
     return results
 
-# --- 2. 呈現介面 ---
+# --- 2. 呈現介面 (保持原樣) ---
 if "data" not in st.session_state:
-    with st.spinner('讀取訊號中...'):
+    with st.spinner('正在從 3 個分頁同步數據...'):
         st.session_state["data"] = run_scan()
 
 data_list = st.session_state.get("data", [])
 
 col_t, col_b = st.columns([8, 2])
-with col_t: st.subheader("🐯 金虎南-訊號監控")
+with col_t: st.subheader("🐯 金虎南-全方位監控")
 with col_b:
-    if st.button("🔄 刷新"):
-        if "data" in st.session_state: del st.session_state["data"]
+    if st.button("🔄 刷新數據"):
+        del st.session_state["data"]
         st.rerun()
 
 if not data_list:
-    st.info("試算表 F 欄位目前無訊號標註。")
+    st.info("所選分頁的 F 欄位目前皆無訊號標註。")
 else:
     for item in data_list:
         df = item['df']
-        total_len = len(df)
+        t_len = len(df)
         header = f"{item['sid']} {item['name']} ({item['price']:.2f}) ➔ {item['sign']}"
         
         with st.expander(header, expanded=True):
@@ -116,7 +112,7 @@ else:
             if item['box']:
                 b = item['box']
                 fig.add_shape(type="rect", x0=b['start'], x1=b['end'], y0=b['bottom'], y1=b['top'],
-                              line=dict(width=0), fillcolor="gray", opacity=0.3)
+                             line=dict(width=0), fillcolor="gray", opacity=0.3)
 
             fig.add_trace(go.Candlestick(
                 x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
@@ -125,18 +121,13 @@ else:
                 line=dict(width=1.2)
             ))
             
-            # --- 修正：只有在有設定數值時才畫線 ---
-            if item['s_ma_p'] and 'MA_S' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5)))
-            
-            if item['l_ma_p'] and 'MA_L' in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot')))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2.5)))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_L'], line=dict(color='#888888', width=1, dash='dot')))
 
             fig.update_layout(
                 height=380, showlegend=False, template="plotly_white",
-                xaxis_rangeslider_visible=False,
-                margin=dict(l=5, r=5, t=5, b=5),
-                xaxis=dict(type='category', range=[total_len - 42, total_len - 0.5], showticklabels=False, fixedrange=True),
+                xaxis_rangeslider_visible=False, margin=dict(l=5, r=5, t=5, b=5),
+                xaxis=dict(type='category', range=[t_len - 42, t_len - 0.5], showticklabels=False, fixedrange=True),
                 yaxis=dict(side='right', tickfont=dict(size=11), fixedrange=True),
                 hovermode=False
             )
