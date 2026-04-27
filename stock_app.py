@@ -10,7 +10,7 @@ st.set_page_config(layout="wide", page_title="金虎南-精密訊號監控")
 
 # 這裡請確認你的網址與分頁 GID 是否正確
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-GIDS = ["0", "1241939414", "534437042"]
+GIDS = ["0", "1241939414", "534437042", "1019044698"]
 
 def run_scan():
     all_targets = []
