@@ -7,12 +7,12 @@ import io
 
 st.set_page_config(layout="wide", page_title="金虎南-精密訊號監控")
 
+# --- 1. 讀取 Google Sheets 標的 ---
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
 GIDS = ["0", "1241939414", "534437042", "1019044698"]
 
 def run_scan():
     all_targets = []
-    # 步驟 1: 讀取標的
     for gid in GIDS:
         csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}"
         try:
@@ -31,69 +31,71 @@ def run_scan():
                 })
         except: continue
 
-    if not all_targets: return [], "找不到標的"
+    if not all_targets: return [], "讀取 Sheet 失敗"
 
     results = []
-    diag_msg = ""
+    last_diag = "掃描開始"
     
-    # 步驟 2: 逐一同步數據
+    # --- 2. 數據抓取與判定 (同步 GAS 邏輯) ---
     for item in all_targets:
         try:
             sid = item['sid']
             tk = yf.Ticker(sid)
             
-            # 優先抓取即時價 (比照 GAS 的 regularMarketPrice)
-            # 如果 fast_info 不穩，改用 basic_info 或 history[-1]
-            fast = tk.fast_info
-            curr_p = fast.get('last_price') or fast.get('previous_close')
-            
-            if curr_p is None:
-                continue
+            # 【關鍵：改用 history(1d) 抓取當前價，避開不穩定的 fast_info】
+            today_data = tk.history(period="1d")
+            if today_data.empty: continue
+            curr_p = float(today_data['Close'].iloc[-1]) # 這就是 GAS 的 regularMarketPrice
 
-            # 下載歷史數據
-            stock = tk.history(period="150d")
-            stock.dropna(subset=['Close'], inplace=True)
-            if len(stock) < 2: continue
+            # 抓取 150 天歷史資料算均線
+            hist = tk.history(period="150d")
+            hist.dropna(subset=['Close'], inplace=True)
+            if len(hist) < 2: continue
 
             s_day = int(item['s_ma_p']) if pd.notna(item['s_ma_p']) else 0
-            if s_day == 0: continue
+            if s_day <= 0: continue
             
-            # 建立 pList 模擬 GAS 邏輯
-            hist_closes = stock['Close'].tolist()
-            p_list = [curr_p] + hist_closes[::-1][1:] 
+            # 建立 pList：[今日即時價, 昨日收盤, 前日收盤...]
+            hist_list = hist['Close'].tolist()
+            p_list = [curr_p] + hist_list[::-1][1:] 
 
-            def get_ma(arr, period, offset):
+            # 均線計算邏輯與 GAS 一致
+            def calc_ma(arr, period, offset):
                 sub = arr[offset : offset + period]
                 return sum(sub) / period if len(sub) == period else 0
 
-            curr_ma = get_ma(p_list, s_day, 0)
-            prev_ma = get_ma(p_list, s_day, 1)
-            prev_p = p_list[1]
+            curr_ma = calc_ma(p_list, s_day, 0)
+            prev_ma = calc_ma(p_list, s_day, 1)
+            prev_p = p_list[1] # 歷史收盤最後一筆
 
-            # 判定邏輯：昨下今上
+            # 突破判定
             is_break_above = (prev_p <= prev_ma) and (curr_p > curr_ma)
             is_break_below = (prev_p >= prev_ma) and (curr_p < curr_ma)
 
             if is_break_above or is_break_below:
-                stock.iloc[-1, stock.columns.get_loc('Close')] = curr_p
-                stock['MA_S'] = stock['Close'].rolling(window=s_day).mean()
+                # 更新畫圖用的 Dataframe
+                hist.iloc[-1, hist.columns.get_loc('Close')] = curr_p
+                hist['MA_S'] = hist['Close'].rolling(window=s_day).mean()
                 
                 l_val = item.get('l_ma_p')
-                stock['MA_L'] = stock['Close'].rolling(window=int(l_val)).mean() if pd.notna(l_val) else None
+                hist['MA_L'] = hist['Close'].rolling(window=int(l_val)).mean() if pd.notna(l_val) else None
 
                 bias = ((curr_p - curr_ma) / curr_ma) * 100
                 trend = "⤴️" if curr_ma > prev_ma else "⤵️"
                 item.update({
-                    "df": stock,
-                    "sign": f"{'🚀突破' if is_break_above else '🚨跌破'} {s_day}MA({trend}) | 即時:{curr_p:.2f} | MA:{curr_ma:.2f}",
+                    "df": hist,
+                    "sign": f"{'🚀突破' if is_break_above else '🚨跌破'} {s_day}MA({trend}) | 即時:{curr_p:.2f} | MA:{curr_ma:.2f} | 乖離:{bias:.2f}%",
                 })
                 results.append(item)
             
-            diag_msg = f"最後掃描: {sid} 價格:{curr_p:.2f} MA:{curr_ma:.2f}"
-        except: continue
-    return results, diag_msg
+            last_diag = f"最後執行: {sid} 價:{curr_p:.1f}"
+        except Exception as e:
+            last_diag = f"錯誤: {sid} {str(e)}"
+            continue
+            
+    return results, last_diag
 
-# --- 介面 ---
+# --- 3. 介面呈現 ---
 col_t, col_b = st.columns([8, 2])
 with col_t: st.subheader("🐯 金虎南-精密訊號過濾系統")
 with col_b:
@@ -102,15 +104,15 @@ with col_b:
         st.rerun()
 
 if "data" not in st.session_state:
-    with st.spinner('同步中...'):
-        res, msg = run_scan()
+    with st.spinner('數據同步中...'):
+        res, diag = run_scan()
         st.session_state["data"] = res
-        st.session_state["diag"] = msg
+        st.session_state["diag"] = diag
 
 data_list = st.session_state.get("data", [])
 
 if not data_list:
-    st.info(f"目前尚無符合訊號。({st.session_state.get('diag', '')})")
+    st.info(f"目前尚無符合訊號。({st.session_state.get('diag', '無診斷資訊')})")
 else:
     for i, item in enumerate(data_list):
         df = item['df']
@@ -120,7 +122,7 @@ else:
                 x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                 increasing_line_color='#E63946', decreasing_line_color='#2A9D8F'
             ))
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], line=dict(color='#0055CC', width=2)))
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA_S'], name="短MA", line=dict(color='#0055CC', width=2)))
             
             t_len = len(df)
             fig.update_layout(
