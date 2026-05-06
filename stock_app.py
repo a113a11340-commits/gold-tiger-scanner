@@ -22,7 +22,10 @@ def fetch_signals(sid, short_n, long_n):
     """核心判定邏輯：包含一般轉折、2日法則、以及 4 種反2日狀況"""
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
-        max_n = int(max(filter(pd.notna, [short_n, long_n]))) + 15
+        # 避免 max 函數在空值時出錯
+        valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
+        max_n = int(max(valid_ns)) + 15 if valid_ns else 35
+        
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d&t={time.time()}"
         try:
             res = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
@@ -30,7 +33,6 @@ def fetch_signals(sid, short_n, long_n):
             r = res.json()['chart']['result'][0]
             q = r['indicators']['quote'][0]
             
-            # 取得歷史資料
             cls = [p for p in q['close'] if p is not None]
             hi = [p for p in q['high'] if p is not None]
             lo = [p for p in q['low'] if p is not None]
@@ -39,7 +41,6 @@ def fetch_signals(sid, short_n, long_n):
             
             if len(cls) < 3: continue
 
-            # 定義時間點：t0(今天), t1(昨天), t2(前天)
             p0, p1, p2 = cur_price, cls[-2], cls[-3]
             h1, l1 = hi[-2], lo[-2]
             
@@ -53,30 +54,21 @@ def fetch_signals(sid, short_n, long_n):
                 ma1 = sum(cls[-n-1:-1]) / n
                 ma2 = sum(cls[-n-2:-2]) / n
 
-                # --- A. 反 2 日法則系列 ---
-                # 狀況 1: 假跌破 (昨跌破，今站回)
                 if p1 < ma1 and p0 > ma0:
                     signal_text = f"反2日(假跌破){label}({n}MA:{ma0:.2f}) 📈"
                     break
-                # 狀況 2: 假突破 (昨站上，今跌破)
                 if p1 > ma1 and p0 < ma0:
                     signal_text = f"反2日(假突破){label}({n}MA:{ma0:.2f}) 📉"
                     break
-                # 狀況 3: 支撐轉強 (昨碰線守住，今上漲)
                 if p1 > ma1 and l1 <= ma1 and p0 > p1:
                     signal_text = f"反2日(支撐轉強){label}({n}MA:{ma0:.2f}) ⬆️"
                     break
-                # 狀況 4: 壓力轉弱 (昨碰線未過，今下跌)
                 if p1 < ma1 and h1 >= ma1 and p0 < p1:
                     signal_text = f"反2日(壓力轉弱){label}({n}MA:{ma0:.2f}) ⬇️"
                     break
-
-                # --- B. 2 日法則系列 ---
                 if p1 > ma1 and p0 > ma0 and p0 > p1 and p2 <= ma2:
                     signal_text = f"2日法則強勢表態{label}({n}MA:{ma0:.2f}) ⬆️ [加碼 1/2]"
                     break
-
-                # --- C. 一般站上/跌破 ---
                 if p1 >= ma1 and p0 < ma0:
                     signal_text = f"跌破{label}({n}MA:{ma0:.2f}) 📉 [停損]"
                     break
@@ -99,14 +91,24 @@ def run_scan():
             res.encoding = 'utf-8'
             df = pd.read_csv(io.StringIO(res.text))
             for _, row in df.iterrows():
-                sid = str(row.iloc[0]).split('.')[0].strip()
-                if not sid: continue
-                sn, ln = pd.to_numeric(row.iloc[2], errors='coerce'), pd.to_numeric(row.iloc[3], errors='coerce')
-                data = fetch_signals(sid, sn, ln)
+                # 處理代號去小數點
+                sid_raw = row.iloc[0]
+                if pd.isna(sid_raw): continue
+                sid = str(int(float(sid_raw))) if str(sid_raw).replace('.','').isdigit() else str(sid_raw).strip()
+                
+                sn_raw = pd.to_numeric(row.iloc[2], errors='coerce')
+                ln_raw = pd.to_numeric(row.iloc[3], errors='coerce')
+                
+                data = fetch_signals(sid, sn_raw, ln_raw)
                 if data:
                     results[sheet_name].append({
-                        "A (代號)": sid, "B (名稱)": row.iloc[1], "短參": sn, "D (長": ln,
-                        "現價": f"{data['price']:.2f}", "訊號": data['signal'], "量能": data['vol']
+                        "A (代號)": sid, 
+                        "B (名稱)": row.iloc[1], 
+                        "短參": int(sn_raw) if pd.notna(sn_raw) else "", 
+                        "D (長": int(ln_raw) if pd.notna(ln_raw) else "",
+                        "現價": f"{data['price']:.2f}", 
+                        "訊號": data['signal'], 
+                        "量能": data['vol']
                     })
         except: continue
     return results
