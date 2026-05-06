@@ -5,15 +5,16 @@ import io
 import time
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-戰情監控版")
+st.set_page_config(layout="wide", page_title="金虎南-全訊號監控戰情室")
 
-# 強制優化網頁邊距，讓表格佔滿畫面
+# 強制優化網頁邊距
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
     </style>
     """, unsafe_allow_html=True)
 
+# 試算表設定
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
 SHEET_MAP = {
     "0": "工作表1",
@@ -22,6 +23,7 @@ SHEET_MAP = {
 }
 
 def fetch_yahoo_data_sync(sid):
+    """同步第一個程式的 API 讀取邏輯"""
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
         # 加入 time 參數防止抓到舊的 API 暫存
@@ -31,17 +33,27 @@ def fetch_yahoo_data_sync(sid):
             if res.status_code != 200: continue
             r = res.json()['chart']['result'][0]
             q = r['indicators']['quote'][0]
+            
+            # 資料處理：反轉並過濾空值
             closes = [p for p in reversed(q['close']) if p is not None]
             highs = [h for h in reversed(q['high']) if h is not None]
             lows = [l for l in reversed(q['low']) if l is not None]
             vols = [v for v in reversed(q['volume']) if v is not None]
             cur_price = r['meta']['regularMarketPrice']
+            
             # p_list 同步第一個程式邏輯: [現價] + [歷史收盤1...]
-            return {"p_list": [cur_price] + closes[1:], "highs": highs, "lows": lows, "vols": vols, "cur_price": cur_price}
+            return {
+                "p_list": [cur_price] + closes[1:], 
+                "highs": highs, 
+                "lows": lows, 
+                "vols": vols, 
+                "cur_price": cur_price
+            }
         except: continue
     return None
 
 def run_scan():
+    """執行全分頁掃描"""
     grouped_results = {name: [] for name in SHEET_MAP.values()}
     for gid, sheet_name in SHEET_MAP.items():
         # 強制 Google Sheets 刷新暫存
@@ -54,6 +66,7 @@ def run_scan():
                 sid_raw = str(row.iloc[0]).split('.')[0].strip()
                 if not sid_raw: continue
                 
+                # 均線設定讀取
                 s_ma_p = pd.to_numeric(row.iloc[2], errors='coerce')
                 l_ma_p = pd.to_numeric(row.iloc[3], errors='coerce')
                 if pd.isna(s_ma_p) and pd.isna(l_ma_p): continue
@@ -66,21 +79,24 @@ def run_scan():
                 if len(data['highs']) >= 6:
                     r_h, r_l = data['highs'][1:6], data['lows'][1:6]
                     bt, bb = max(r_h), min(r_l)
+                    # 3% 收斂判定
                     if (bt - bb) / bb < 0.03:
                         v = data['vols']
                         if data['cur_price'] > bt and v[0] > v[1] * 1.2:
-                            box_status = "🚀突破箱型"
+                            box_status = "🚀突破箱型(紅)"
                         elif data['cur_price'] < bb:
-                            box_status = "💀跌破箱型"
+                            box_status = "💀跌破箱型(綠)"
                         else:
                             box_status = "⌛盤整中"
 
+                # 讀取試算表原始訊號
                 sheet_sign = str(row.iloc[5]).strip() if len(row) > 5 and pd.notna(row.iloc[5]) else ""
                 
-                # 只保留有訊號的
+                # 過濾：只保留有訊號的股票
                 if not sheet_sign and not box_status: continue
 
-                vol_tag = "🔴量增" if (len(data['vols'])>1 and data['vols'][0] > data['vols'][1]*1.2) else ""
+                # 成交量判定
+                vol_tag = "🔴量增" if (len(data['vols']) > 1 and data['vols'][0] > data['vols'][1] * 1.2) else ""
 
                 grouped_results[sheet_name].append({
                     "代號": sid_raw,
@@ -93,13 +109,15 @@ def run_scan():
         except: continue
     return grouped_results
 
-# --- 介面呈現 ---
+# --- 2. 介面呈現 ---
 st.title("🐯 金虎南-全訊號監控 (自動撐開版)")
 
+# 初始讀取或從暫存讀取
 if "data" not in st.session_state:
-    st.session_state["data"] = run_scan()
+    with st.spinner('正在讀取所有分頁訊號...'):
+        st.session_state["data"] = run_scan()
 
-# 顯示清除暫存按鈕
+# 徹底重啟與重抓按鈕
 if st.button("🔄 徹底清除暫存並重新抓取資料"):
     if "data" in st.session_state:
         del st.session_state["data"]
@@ -108,19 +126,20 @@ if st.button("🔄 徹底清除暫存並重新抓取資料"):
 gd = st.session_state["data"]
 has_any = False
 
+# 依照分頁分組顯示
 for s_name, signals in gd.items():
     if signals:
         has_any = True
-        st.subheader(f"📊 {s_name} (有 {len(signals)} 檔訊號)")
+        # 顯示分頁標題與統計數量
+        st.subheader(f"📊 {s_name} (目前有 {len(signals)} 檔訊號)")
         
-        # 使用 st.dataframe 並設定 height=None，會根據內容自動撐開高度，不產生內部捲軸
-        st.dataframe(
-            pd.DataFrame(signals),
-            use_container_width=True,
-            hide_index=True,
-            height=None  # 關鍵設定：讓表格有多少行就長多高
-        )
+        # 轉換為 DataFrame 顯示
+        df_display = pd.DataFrame(signals)
+        
+        # 使用 st.table 達到「自動撐開高度、不產生內部捲軸」的效果
+        st.table(df_display)
+        
         st.divider()
 
 if not has_any:
-    st.info("目前所有分頁皆無觸發訊號。")
+    st.info("目前所有分頁清單中，皆無觸發任何訊號。")
