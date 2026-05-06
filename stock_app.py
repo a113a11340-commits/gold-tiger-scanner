@@ -5,111 +5,129 @@ import io
 import time
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-試算表同步戰情室")
+st.set_page_config(layout="wide", page_title="金虎南-轉折終極戰情室")
 
-# 強制調整邊距，讓表格長得像試算表
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
-    table { width: 100% !important; }
+    table { width: 100% !important; font-size: 18px !important; }
+    th { background-color: #f0f2f6 !important; }
     </style>
     """, unsafe_allow_html=True)
 
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-SHEET_MAP = {
-    "0": "工作表1",
-    "1241939414": "工作表2",
-    "534437042": "工作表3"
-}
+SHEET_MAP = {"0": "工作表1", "1241939414": "工作表2", "534437042": "工作表3"}
 
-def calculate_ma_signals(sid, short_n, long_n):
-    """直接在網頁端計算均線並判定站上/跌破"""
+def fetch_signals(sid, short_n, long_n):
+    """核心判定邏輯：包含一般轉折、2日法則、以及 4 種反2日狀況"""
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
-        # 抓取足夠計算長均線的歷史資料
-        max_n = int(max(short_n, long_n)) + 5
+        max_n = int(max(filter(pd.notna, [short_n, long_n]))) + 15
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d&t={time.time()}"
         try:
             res = requests.get(url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
             if res.status_code != 200: continue
             r = res.json()['chart']['result'][0]
-            closes = [p for p in r['indicators']['quote'][0]['close'] if p is not None]
+            q = r['indicators']['quote'][0]
+            
+            # 取得歷史資料
+            cls = [p for p in q['close'] if p is not None]
+            hi = [p for p in q['high'] if p is not None]
+            lo = [p for p in q['low'] if p is not None]
+            vols = [v for v in reversed(q['volume']) if v is not None]
             cur_price = r['meta']['regularMarketPrice']
             
-            if len(closes) < max(short_n, long_n): continue
+            if len(cls) < 3: continue
+
+            # 定義時間點：t0(今天), t1(昨天), t2(前天)
+            p0, p1, p2 = cur_price, cls[-2], cls[-3]
+            h1, l1 = hi[-2], lo[-2]
             
-            # 計算均線 (Python 邏輯)
-            ma_short = sum(closes[-int(short_n):]) / short_n
-            ma_long = sum(closes[-int(long_n):]) / long_n
+            signal_text = ""
+            ma_list = [("短", short_n), ("長", long_n)]
             
-            # 判定站上/跌破
-            if cur_price > ma_short and cur_price > ma_long:
-                status = "🟢 站上均線"
-            elif cur_price < ma_short or cur_price < ma_long:
-                status = "🔴 跌破均線"
-            else:
-                status = "🟡 均線糾結"
-                
-            return {"cur_price": cur_price, "status": status}
+            for label, n in ma_list:
+                if pd.isna(n): continue
+                n = int(n)
+                ma0 = sum(cls[-n:]) / n
+                ma1 = sum(cls[-n-1:-1]) / n
+                ma2 = sum(cls[-n-2:-2]) / n
+
+                # --- A. 反 2 日法則系列 ---
+                # 狀況 1: 假跌破 (昨跌破，今站回)
+                if p1 < ma1 and p0 > ma0:
+                    signal_text = f"反2日(假跌破){label}({n}MA:{ma0:.2f}) 📈"
+                    break
+                # 狀況 2: 假突破 (昨站上，今跌破)
+                if p1 > ma1 and p0 < ma0:
+                    signal_text = f"反2日(假突破){label}({n}MA:{ma0:.2f}) 📉"
+                    break
+                # 狀況 3: 支撐轉強 (昨碰線守住，今上漲)
+                if p1 > ma1 and l1 <= ma1 and p0 > p1:
+                    signal_text = f"反2日(支撐轉強){label}({n}MA:{ma0:.2f}) ⬆️"
+                    break
+                # 狀況 4: 壓力轉弱 (昨碰線未過，今下跌)
+                if p1 < ma1 and h1 >= ma1 and p0 < p1:
+                    signal_text = f"反2日(壓力轉弱){label}({n}MA:{ma0:.2f}) ⬇️"
+                    break
+
+                # --- B. 2 日法則系列 ---
+                if p1 > ma1 and p0 > ma0 and p0 > p1 and p2 <= ma2:
+                    signal_text = f"2日法則強勢表態{label}({n}MA:{ma0:.2f}) ⬆️ [加碼 1/2]"
+                    break
+
+                # --- C. 一般站上/跌破 ---
+                if p1 >= ma1 and p0 < ma0:
+                    signal_text = f"跌破{label}({n}MA:{ma0:.2f}) 📉 [停損]"
+                    break
+                if p1 <= ma1 and p0 > ma0:
+                    signal_text = f"站上{label}({n}MA:{ma0:.2f}) 📈"
+                    break
+
+            vol_tag = "🔴量增" if (len(vols) > 1 and vols[0] > vols[1] * 1.2) else ""
+            if signal_text:
+                return {"price": cur_price, "signal": signal_text, "vol": vol_tag}
         except: continue
     return None
 
 def run_scan():
-    """執行全分頁掃描"""
-    grouped_results = {name: [] for name in SHEET_MAP.values()}
+    results = {name: [] for name in SHEET_MAP.values()}
     for gid, sheet_name in SHEET_MAP.items():
         csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}&cb={time.time()}"
         try:
             res = requests.get(csv_url, timeout=10)
             res.encoding = 'utf-8'
-            raw_df = pd.read_csv(io.StringIO(res.text))
-            
-            for _, row in raw_df.iterrows():
-                sid_raw = str(row.iloc[0]).split('.')[0].strip()
-                if not sid_raw: continue
-                
-                # 從試算表讀取你設定的均線天數 (C, D 欄)
-                short_ma_days = pd.to_numeric(row.iloc[2], errors='coerce')
-                long_ma_days = pd.to_numeric(row.iloc[3], errors='coerce')
-                
-                if pd.isna(short_ma_days) or pd.isna(long_ma_days): continue
-                
-                # 呼叫計算邏輯
-                result = calculate_ma_signals(sid_raw, short_ma_days, long_ma_days)
-                if not result: continue
-
-                grouped_results[sheet_name].append({
-                    "代號": sid_raw,
-                    "名稱": row.iloc[1] if pd.notna(row.iloc[1]) else "未命名",
-                    "短均天數": int(short_ma_days),
-                    "長均天數": int(long_ma_days),
-                    "現價": f"{result['cur_price']:.2f}",
-                    "判定結果": result['status'],
-                    "原始備註": str(row.iloc[5]) if len(row) > 5 and pd.notna(row.iloc[5]) else ""
-                })
+            df = pd.read_csv(io.StringIO(res.text))
+            for _, row in df.iterrows():
+                sid = str(row.iloc[0]).split('.')[0].strip()
+                if not sid: continue
+                sn, ln = pd.to_numeric(row.iloc[2], errors='coerce'), pd.to_numeric(row.iloc[3], errors='coerce')
+                data = fetch_signals(sid, sn, ln)
+                if data:
+                    results[sheet_name].append({
+                        "A (代號)": sid, "B (名稱)": row.iloc[1], "短參": sn, "D (長": ln,
+                        "現價": f"{data['price']:.2f}", "訊號": data['signal'], "量能": data['vol']
+                    })
         except: continue
-    return grouped_results
+    return results
 
 # --- 2. 介面呈現 ---
-st.title("🐯 金虎南-試算表同步監控")
+st.title("🐯 金虎南：反2日轉折監控系統")
 
 if "data" not in st.session_state:
-    with st.spinner('正在根據試算表參數進行 Python 即時運算...'):
-        st.session_state["data"] = run_scan()
+    st.session_state["data"] = run_scan()
 
-if st.button("🔄 重新同步試算表並重新計算"):
-    if "data" in st.session_state:
-        del st.session_state["data"]
+if st.button("🔄 同步試算表並重新計算 (H 更新)"):
+    st.session_state["data"] = run_scan()
     st.rerun()
 
-gd = st.session_state["data"]
-for s_name, signals in gd.items():
+found = False
+for s_name, signals in st.session_state["data"].items():
     if signals:
+        found = True
         st.subheader(f"📊 {s_name}")
-        # 轉換為 DataFrame 並顯示，這會長得跟試算表一模一樣
-        df_display = pd.DataFrame(signals)
-        st.table(df_display) 
+        st.table(pd.DataFrame(signals))
         st.divider()
 
-if not any(gd.values()):
-    st.info("目前沒有符合均線判定條件的股票。")
+if not found:
+    st.info("目前監控名單中無觸發訊號。")
