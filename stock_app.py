@@ -20,11 +20,19 @@ SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K
 TARGET_GID = "0"
 TARGET_NAME = "工作表1"
 
-def calc_ma(cls, n):
-    """安全計算移動平均線"""
-    if len(cls) < n or n < 1:
+def calc_ma_by_index(cls, end_idx, n):
+    """
+    精準計算特定截止點的 MA
+    end_idx: 0 代表最新一天, 1 代表前一天, 2 代表前兩天
+    """
+    if end_idx == 0:
+        sub_list = cls
+    else:
+        sub_list = cls[:-end_idx]
+        
+    if len(sub_list) < n or n < 1:
         return None
-    return sum(cls[-n:]) / n
+    return sum(sub_list[-n:]) / n
 
 @st.cache_data(ttl=60, show_spinner="正在抓取 Yahoo 即時資料...")
 def fetch_signals(sid, short_n, long_n):
@@ -33,7 +41,8 @@ def fetch_signals(sid, short_n, long_n):
     for sfx in suffixes:
         try:
             valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
-            max_n = int(max(valid_ns)) + 20 if valid_ns else 40
+            # 修正：將天數乘以 1.5 倍以補足台股休假日，確保有足夠的 K 線數量
+            max_n = int(max(valid_ns) * 1.5) + 20 if valid_ns else 60
             
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
             res = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
@@ -52,7 +61,10 @@ def fetch_signals(sid, short_n, long_n):
                 continue
 
             cur_price = meta.get('regularMarketPrice') or cls[-1]
-            p0, p1, p2 = cur_price, cls[-2], cls[-3] if len(cls) >= 3 else p1
+            
+            # 確保最新價格同步到 cls 陣列中做精準比對
+            cls[-1] = cur_price
+            p0, p1, p2 = cls[-1], cls[-2], cls[-3] if len(cls) >= 3 else cls[-2]
             
             signal_text = ""
             ma_list = [("短", short_n), ("長", long_n)]
@@ -62,14 +74,15 @@ def fetch_signals(sid, short_n, long_n):
                     continue
                 n = int(n)
                 
-                ma0 = calc_ma(cls, n)
-                ma1 = calc_ma(cls[:-1], n)   # 前一天的MA
-                ma2 = calc_ma(cls[:-2], n)   # 前兩天的MA
+                # 使用修正後的 MA 函數，確保時間軸對齊
+                ma0 = calc_ma_by_index(cls, 0, n)
+                ma1 = calc_ma_by_index(cls, 1, n)
+                ma2 = calc_ma_by_index(cls, 2, n)
                 
                 if ma0 is None or ma1 is None or ma2 is None:
                     continue
 
-                # 2日法則強勢表態
+                # 2日法則強勢表態 (前天在MA下或附近，昨天站上且今天續強)
                 if p1 > ma1 and p0 > ma0 and p0 > p1 and p2 <= ma2:
                     signal_text = f"2日法則強勢表態{label}({n}MA:{ma0:.2f}) ⬆️ [加碼 1/2]"
                     break
@@ -95,7 +108,7 @@ def fetch_signals(sid, short_n, long_n):
                 }
                 
         except Exception:
-            continue  # 單一股票失敗不中斷其他股票
+            continue  
     
     return None
 
@@ -117,6 +130,7 @@ def run_scan():
                 continue
                 
             sid = str(sid_raw).strip()
+            # 修正：支援防呆，避免 2330 變成 2330.0
             if sid.replace('.', '').replace('-', '').isdigit():
                 sid = str(int(float(sid)))
             
@@ -143,7 +157,6 @@ def run_scan():
 # --- 主介面 ---
 st.title("🐯 金虎南：轉折監控系統 (主表模式)")
 
-# 更新時間顯示
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
 st.caption(f"最後更新時間：{update_time}（快取60秒）")
 
@@ -155,7 +168,7 @@ with col1:
 
 with col2:
     if st.button("🚀 強制刷新即時報價", type="primary", use_container_width=True):
-        run_scan.clear()                    # 清除快取
+        run_scan.clear()                    
         fetch_signals.clear()
         st.session_state["data"] = run_scan()
         st.rerun()
