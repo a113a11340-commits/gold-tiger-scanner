@@ -1,111 +1,82 @@
 import streamlit as st
 import pandas as pd
 import requests
-import io
-import time
+import numpy as np
+import datetime
 
-# --- 1. 網頁基本設定 ---
+# --- 1. 設定與參數 ---
 st.set_page_config(layout="wide", page_title="金虎南-轉折監控")
+SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4/export?format=csv&gid=1426872214"
+FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
 
-# --- API 設定檢查 ---
-if "FUGLE_API_KEY" not in st.secrets:
-    st.error("請在 .streamlit/secrets.toml 中設定 FUGLE_API_KEY")
-    st.stop()
+# --- 2. 核心運算函數 ---
+def get_resonance_line(closes):
+    data = closes[-60:]
+    min_v, max_v = min(data), max(data)
+    range_v = max_v - min_v
+    if range_v <= 0: return data[-1]
+    buckets = np.histogram(data, bins=20)[0]
+    return min_v + (np.argmax(buckets) * (range_v / 19))
 
-# 鎖定主試算表
-SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-TARGET_GID = "0"
-TARGET_NAME = "工作表1"
-
-# --- 核心函式 ---
-
-def get_fugle_price(sid):
-    """取得富果即時成交價"""
-    try:
-        # 免費版 API 使用的 URL
-        url = f"https://api.fugle.tw/marketdata/v0.3/intraday/quote?symbolId={sid}&apiToken={st.secrets['FUGLE_API_KEY']}"
-        res = requests.get(url, timeout=5)
-        data = res.json()
-        return data['data']['quote']['trade']['price']
-    except:
-        return None
-
-def calc_ma_by_index(cls, end_idx, n):
-    sub_list = cls if end_idx == 0 else cls[:-end_idx]
-    if len(sub_list) < n or n < 1: return None
-    return sum(sub_list[-n:]) / n
-
-@st.cache_data(ttl=60, show_spinner="正在獲取行情...")
+@st.cache_data(ttl=60)
 def fetch_signals(sid, short_n, long_n):
-    # 1. 獲取 Yahoo 歷史資料 (計算 MA 用)
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
         try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range=60d&interval=1d"
-            res = requests.get(url, timeout=5)
+            # 歷史資料依舊使用 Yahoo
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range=100d&interval=1d"
+            res = requests.get(url, timeout=8)
             if res.status_code != 200: continue
-            
             data = res.json()['chart']['result'][0]
-            quote = data['indicators']['quote'][0]
-            cls = [p for p in quote['close'] if p is not None]
+            cls = [p for p in data['indicators']['quote'][0]['close'] if p is not None]
+            if len(cls) < 40: continue
             
-            # 2. 替換今日價格為富果即時價
-            live_price = get_fugle_price(sid)
-            if live_price:
-                cls[-1] = live_price
+            # 判斷是否為開盤日 (週一至週五)
+            now = datetime.datetime.now()
+            is_weekday = now.weekday() < 5
             
-            p0, p1, p2 = cls[-1], cls[-2], cls[-3]
+            # 即時價格獲取邏輯
+            p0 = cls[-1]  # 預設使用收盤價
+            if is_weekday:
+                f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
+                f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
+                if f_res.status_code == 200:
+                    fugle_data = f_res.json().get('data', {}).get('quote', {})
+                    p0 = fugle_data.get('price', cls[-1])
             
-            # 3. 判斷邏輯
-            signal_text = ""
-            for label, n in [("短", short_n), ("長", long_n)]:
-                if pd.isna(n): continue
-                n = int(n)
-                ma0 = calc_ma_by_index(cls, 0, n)
-                ma1 = calc_ma_by_index(cls, 1, n)
-                ma2 = calc_ma_by_index(cls, 2, n)
-                
-                if not all([ma0, ma1, ma2]): continue
-
-                if p1 > ma1 and p0 > ma0 and p0 > p1 and p2 <= ma2:
-                    signal_text = f"2日強勢表態{label}({n}MA:{ma0:.2f}) ⬆️"
-                    break
-                if p1 >= ma1 and p0 < ma0:
-                    signal_text = f"跌破{label}({n}MA:{ma0:.2f}) 📉"
-                    break
-                if p1 <= ma1 and p0 > ma0:
-                    signal_text = f"站上{label}({n}MA:{ma0:.2f}) 📈"
-                    break
-
-            if signal_text:
-                return {"price": cls[-1], "signal": signal_text}
-        except:
-            continue
+            signals = []
+            ma_s = sum(cls[-int(short_n):]) / int(short_n)
+            
+            # 判斷邏輯
+            if cls[-2] < (sum(cls[-int(short_n)-1:-1])/int(short_n)) and p0 > ma_s:
+                signals.append(f"站上{short_n}MA")
+            elif cls[-2] >= (sum(cls[-int(short_n)-1:-1])/int(short_n)) and p0 < ma_s:
+                signals.append(f"跌破{short_n}MA")
+            
+            res_line = get_resonance_line(cls)
+            if abs(p0 - res_line) / res_line < 0.005:
+                signals.append(f"🎯共振線({res_line:.2f})[{'支撐' if p0 >= res_line else '跌破'}]")
+            
+            if signals:
+                return {"price": p0, "signal": " + ".join(signals)}
+        except: continue
     return None
 
-@st.cache_data(ttl=60, show_spinner=False)
-def run_scan():
+# --- 3. 網頁介面 ---
+st.title("🐯 金虎南：工作表20 監控系統")
+
+if st.button("🔄 同步並掃描「工作表20」資料"):
     results = []
-    csv_url = f"{SHEET_BASE}/export?format=csv&gid={TARGET_GID}"
-    try:
-        df = pd.read_csv(io.StringIO(requests.get(csv_url).text))
-        for _, row in df.iterrows():
-            sid = str(int(float(row.iloc[0])))
-            data = fetch_signals(sid, row.iloc[2], row.iloc[3])
-            if data:
-                results.append({"代號": sid, "名稱": row.iloc[1], "現價": f"{data['price']:.2f}", "訊號": data['signal']})
-    except Exception as e:
-        st.error(f"錯誤: {e}")
-    return results
+    df = pd.read_csv(SHEET_CSV_URL)
+    for _, row in df.iterrows():
+        sid = str(row.iloc[0]).split('.')[0] 
+        data = fetch_signals(sid, row.iloc[2], row.iloc[3])
+        if data:
+            results.append({"代號": sid, "名稱": row.iloc[1], "現價": data['price'], "訊號": data['signal']})
+    
+    st.session_state["data"] = results
 
-# --- 主介面 ---
-st.title("🐯 金虎南：轉折監控 (即時版)")
-if st.button("🔄 刷新即時數據"):
-    st.cache_data.clear()
-    st.rerun()
-
-results = run_scan()
-if results:
-    st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
-else:
-    st.info("暫無觸發訊號。")
+if "data" in st.session_state and st.session_state["data"]:
+    st.dataframe(pd.DataFrame(st.session_state["data"]), use_container_width=True, hide_index=True)
+elif "data" in st.session_state:
+    st.info("目前無觸發訊號")
