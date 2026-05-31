@@ -3,8 +3,8 @@ import pandas as pd
 import requests
 import io
 import time
-import concurrent.futures  # 導入多執行緒平行加速庫
-import plotly.graph_objects as go  # 導入進階圖表庫
+import concurrent.futures
+import plotly.graph_objects as go
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-轉折監控")
@@ -29,22 +29,37 @@ def get_ma(arr, period, offset=0):
     sub = arr[offset:offset+period]
     return sum(sub) / period if len(sub) == period else None
 
-# 水平共振線計算邏輯 (找出過去60天最密集的價格區間)
+# 水平共振線計算邏輯
 def get_resonance_line(closes_list):
     data = closes_list[:60]
     if not data: return 0
-    v_min = min(data)
-    v_max = max(data)
+    v_min, v_max = min(data), max(data)
     v_range = v_max - v_min
     if v_range <= 0: return data[0]
     buckets = [0] * 20
     for p in data:
         idx = int(((p - v_min) / v_range) * 19)
-        if idx < 0: idx = 0
-        if idx > 19: idx = 19
+        idx = max(0, min(19, idx))
         buckets[idx] += 1
     max_idx = buckets.index(max(buckets))
     return v_min + (max_idx * (v_range / 19))
+
+# ⚡ 獨立包裝：防截斷的圖表數據線生成器
+def build_plot_lines(cls, short_n, long_n, res_line, highs, is_fugle, slopeH, slopeL, hIdx1, lIdx1, hVal1, lVal1):
+    p_ma_s, p_ma_l, p_res, p_dH, p_dL = [], [], [], [], []
+    for i in range(60):
+        if i >= len(cls): break
+        p_ma_s.append(get_ma(cls, int(short_n), i) if pd.notna(short_n) else None)
+        p_ma_l.append(get_ma(cls, int(long_n), i) if pd.notna(long_n) else None)
+        p_res.append(res_line)
+        if len(highs) >= 51:
+            h_idx = (i - 1) if is_fugle else i
+            p_dH.append(hVal1 + slopeH * (h_idx - hIdx1))
+            p_dL.append(lVal1 + slopeL * (h_idx - lIdx1))
+        else:
+            p_dH.append(None)
+            p_dL.append(None)
+    return p_ma_s, p_ma_l, p_res, p_dH, p_dL
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_signals(sid, short_n, long_n):
@@ -52,8 +67,7 @@ def fetch_signals(sid, short_n, long_n):
     for sfx in suffixes:
         try:
             valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
-            max_n = int(max(valid_ns) * 1.5) + 20 if valid_ns else 60
-            max_n = max(max_n, 90)  # 確保歷史數據足夠計算
+            max_n = max(90, int(max(valid_ns) * 1.5) + 20 if valid_ns else 60)
             
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
             res = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
@@ -63,7 +77,6 @@ def fetch_signals(sid, short_n, long_n):
             quote = data['indicators']['quote'][0]
             timestamps = data.get('timestamp', [])
             
-            # 對齊並過濾無效數據
             raw_cls = quote.get('close', [])
             raw_high = quote.get('high', [])
             raw_low = quote.get('low', [])
@@ -78,19 +91,9 @@ def fetch_signals(sid, short_n, long_n):
                     t_lows.append(raw_low[i])
                     t_opens.append(raw_op[i])
                     t_vols.append(raw_vol[i] if raw_vol[i] is not None else 0)
-                    if i < len(timestamps):
-                        t_dates.append(time.strftime('%Y-%m-%d', time.localtime(timestamps[i])))
-                    else:
-                        t_dates.append("")
+                    t_dates.append(time.strftime('%Y-%m-%d', time.localtime(timestamps[i])) if i < len(timestamps) else "")
                         
-            # 反轉數組，讓 index 0 代表最新的一天
-            cls = t_cls[::-1]
-            highs = t_highs[::-1]
-            lows = t_lows[::-1]
-            opens = t_opens[::-1]
-            vols = t_vols[::-1]
-            dates = t_dates[::-1]
-            
+            cls, highs, lows, opens, vols, dates = t_cls[::-1], t_highs[::-1], t_lows[::-1], t_opens[::-1], t_vols[::-1], t_dates[::-1]
             if len(cls) < 60: continue
 
             # --- 獲取即時價格 (富果 API) ---
@@ -110,7 +113,6 @@ def fetch_signals(sid, short_n, long_n):
                     B_close = cls[1]
             
             if not is_fugle_active:
-                cur_price = cls[0]
                 T_close, T_low, T_high = cls[0], lows[0], highs[0]
                 Y_close, Y_low, Y_high = cls[1], lows[1], highs[1]
                 B_close = cls[2]
@@ -123,161 +125,37 @@ def fetch_signals(sid, short_n, long_n):
             for label, n in ma_list:
                 if pd.isna(n): continue
                 n = int(n)
-                
-                if is_fugle_active:
-                    Y_ma = get_ma(cls, n, 0)
-                    B_ma = get_ma(cls, n, 1)
-                    T_ma = get_ma([T_close] + cls, n, 0)
-                else:
-                    T_ma = get_ma(cls, n, 0)
-                    Y_ma = get_ma(cls, n, 1)
-                    B_ma = get_ma(cls, n, 2)
+                Y_ma = get_ma(cls, n, 0) if is_fugle_active else get_ma(cls, n, 1)
+                B_ma = get_ma(cls, n, 1) if is_fugle_active else get_ma(cls, n, 2)
+                T_ma = get_ma([T_close] + cls, n, 0) if is_fugle_active else get_ma(cls, n, 0)
                 
                 if T_ma is None or Y_ma is None or B_ma is None: continue
-
                 trend = "⬆️" if T_ma > Y_ma else "↘️"
                 label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
                 
-                is_yesterday_breakout = (B_close < B_ma and Y_close > Y_ma)
-                is_today_away = (T_low > T_ma)
-                is_higher_than_yesterday = (T_close > Y_close)
-                
-                if is_yesterday_breakout and is_today_away and is_higher_than_yesterday:
+                if (B_close < B_ma and Y_close > Y_ma) and (T_low > T_ma) and (T_close > Y_close):
                     signals.append(f"🔥2日法則(強勢突破){label_str}")
                     has_signal = True
                 
-                y_break = (Y_close < Y_ma and B_close >= B_ma)
-                if y_break and T_close > T_ma:
-                    if (T_close - T_ma) / T_ma > 0.005:
-                        signals.append(f"🔄反2日(假跌破){label_str}[強勢反轉]")
-                    else:
-                        signals.append(f"🔄反2日(假跌破){label_str}")
+                if (Y_close < Y_ma and B_close >= B_ma) and T_close > T_ma:
+                    tag = "[強勢反轉]" if (T_close - T_ma) / T_ma > 0.005 else ""
+                    signals.append(f"🔄反2日(假跌破){label_str}{tag}")
                     has_signal = True
                 
                 if Y_close >= Y_ma and T_close < T_ma:
                     signals.append(f"跌破{label_str}[停損]")
                     has_signal = True
-                elif Y_close < Y_ma and T_close > T_ma and not any("假跌破" in s or "2日法則" in s for s in signals):
+                elif Y_close < Y_ma and T_close > T_ma and not any(k in s for k in ["假跌破", "2日法則"] for s in signals):
                     signals.append(f"突破{label_str}[進場1/2]")
                     has_signal = True
 
             # 2. 小箱型邏輯
             if not pd.isna(short_n):
-                idx_offset = 1 if is_fugle_active else 2
-                c_highs = [T_high, Y_high, highs[idx_offset]]
-                c_lows = [T_low, Y_low, lows[idx_offset]]
-                c_closes = [T_close, Y_close, cls[idx_offset]]
-                c_vols = [vols[0], vols[1], vols[2]]
+                off = 1 if is_fugle_active else 2
+                c_highs = [T_high, Y_high, highs[off]]
+                c_lows = [T_low, Y_low, lows[off]]
+                c_closes = [T_close, Y_close, cls[off]]
                 maST = get_ma([T_close] + cls, int(short_n), 0) if is_fugle_active else get_ma(cls, int(short_n), 0)
                 
-                def is_touching(i):
-                    ma = maST if i == 0 else (get_ma(cls, int(short_n), i - 1) if is_fugle_active else get_ma(cls, int(short_n), i))
-                    if ma is None: return False
-                    return c_highs[i] >= ma and c_lows[i] <= ma
-
-                if maST and is_touching(0) and is_touching(1) and is_touching(2):
-                    box_top = max(c_highs)
-                    box_bottom = min(c_closes)
-                    if T_close > max(box_top, maST * 1.015) and c_vols[0] > c_vols[1] * 1.2:
-                        signals.append("💎小箱型突破(表態)")
-                        has_signal = True
-                    elif T_close < min(box_bottom, maST * 0.985):
-                        signals.append("📉小箱型失守")
-                        has_signal = True
-                    else:
-                        signals.append("⌛延續小箱型(盤整中)")
-                        has_signal = True
-
-            # 3. 軌道一：【水平線】狀態精準判定
-            res_line = get_resonance_line(cls if not is_fugle_active else cls[1:])
-            is_res_out = (Y_close < res_line and T_close >= res_line)
-            is_res_break = (Y_close >= res_line and T_close < res_line)
-            
-            if is_res_out:
-                signals.append(f"🎯[水平線:共振壓力]突破({res_line:.2f})")
-                has_signal = True
-            elif is_res_break:
-                signals.append(f"🎯[水平線:共振支撐]跌破({res_line:.2f})")
-                has_signal = True
-            elif abs(T_close - res_line) / res_line < 0.005:
-                if T_close >= res_line:
-                    signals.append(f"🎯[水平線:共振支撐]接近({res_line:.2f})")
-                else:
-                    signals.append(f"🎯[水平線:共振壓力]接近({res_line:.2f})")
-                has_signal = True
-
-            # 4. 軌道二：【斜線】趨勢線動態判定
-            slopeH, slopeL = 0, 0
-            hIdx1, hVal1, hIdx2, hVal2 = 0, 0, 0, 0
-            lIdx1, lVal1, lIdx2, lVal2 = 0, 0, 0, 0
-            
-            if len(highs) >= 51 and len(lows) >= 51:
-                hIdx1, hVal1 = 1, highs[1]
-                for i in range(2, 21):
-                    if highs[i] > hVal1: hVal1 = highs[i]; hIdx1 = i
-                hIdx2, hVal2 = 21, highs[21]
-                for i in range(22, 51):
-                    if highs[i] > hVal2: hVal2 = highs[i]; hIdx2 = i
-
-                lIdx1, lVal1 = 1, lows[1]
-                for i in range(2, 21):
-                    if lows[i] < lVal1: lVal1 = lows[i]; lIdx1 = i
-                lIdx2, lVal2 = 21, lows[21]
-                for i in range(22, 51):
-                    if lows[i] < lVal2: lVal2 = lows[i]; lIdx2 = i
-
-                target_idx = -1 if is_fugle_active else 0
-                y_idx = 0 if is_fugle_active else 1
-
-                slopeH = (hVal1 - hVal2) / (hIdx1 - hIdx2) if (hIdx1 - hIdx2) != 0 else 0
-                diagH_Today = hVal1 + slopeH * (target_idx - hIdx1)
-                diagH_Yest = hVal1 + slopeH * (y_idx - hIdx1)
-
-                slopeL = (lVal1 - lVal2) / (lIdx1 - lIdx2) if (lIdx1 - lIdx2) != 0 else 0
-                diagL_Today = lVal1 + slopeL * (target_idx - lIdx1)
-                diagL_Yest = lVal1 + slopeL * (y_idx - lIdx1)
-
-                if Y_close < diagH_Yest and T_close >= diagH_Today:
-                    signals.append(f"📐[斜線:趨勢壓力]突破({diagH_Today:.2f})")
-                    has_signal = True
-                elif Y_close >= diagL_Yest and T_close < diagL_Today:
-                    signals.append(f"📐[斜線:趨勢支撐]跌破({diagL_Today:.2f})")
-                    has_signal = True
-                else:
-                    if abs(T_close - diagH_Today) / diagH_Today < 0.005:
-                        signals.append(f"📐[斜線:趨勢壓力]接近({diagH_Today:.2f})")
-                        has_signal = True
-                    if abs(T_close - diagL_Today) / diagL_Today < 0.005:
-                        signals.append(f"📐[斜線:趨勢支撐]接近({diagL_Today:.2f})")
-                        has_signal = True
-
-            # 若富果活躍，將今日即時數據塞入最前端以便產出圖表
-            if is_fugle_active:
-                cls = [T_close] + cls
-                highs = [T_high] + highs
-                lows = [T_low] + lows
-                opens = [f_data.get('open', T_close)] + opens
-                dates = [time.strftime('%Y-%m-%d')] + dates
-                vols = [f_data.get('volume', 0)] + vols
-
-            vol_tag = ""
-            if len(vols) >= 2 and vols[0] > vols[1] * 1.25:
-                vol_tag = "🔴量增"
-
-            # 預先生成 3 個月 (60天) 圖表所需的軌道數據線
-            plot_ma_short = []
-            plot_ma_long = []
-            plot_diagH = []
-            plot_diagL = []
-            plot_res = []
-            
-            for i in range(60):
-                if i >= len(cls): break
-                plot_ma_short.append(get_ma(cls, int(short_n), i) if pd.notna(short_n) else None)
-                plot_ma_long.append(get_ma(cls, int(long_n), i) if pd.notna(long_n) else None)
-                plot_res.append(res_line)
-                
-                if len(highs) >= 51:
-                    hist_idx = (i - 1) if is_fugle_active else i
-                    plot_diagH.append(hVal1 + slopeH * (hist_idx - hIdx1))
-                    plot_
+                def is_touch(i):
+                    m = maST if i == 0 else (get_ma(cls, int(short_n), i-1) if is_fugle_active else get_
