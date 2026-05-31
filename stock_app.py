@@ -119,6 +119,9 @@ def fetch_signals(sid, short_n, long_n):
             has_signal = False
             ma_list = [("短", short_n), ("長", long_n)]
             
+            # 用於判斷圖表畫線類型的標籤計數
+            signal_types = set()
+
             # 1. 均線與二日法則判定
             for label, n in ma_list:
                 if pd.isna(n): continue
@@ -145,6 +148,7 @@ def fetch_signals(sid, short_n, long_n):
                 if is_yesterday_breakout and is_today_away and is_higher_than_yesterday:
                     signals.append(f"🔥2日法則(強勢突破){label_str}")
                     has_signal = True
+                    signal_types.add("MA")
                 
                 y_break = (Y_close < Y_ma and B_close >= B_ma)
                 if y_break and T_close > T_ma:
@@ -153,13 +157,16 @@ def fetch_signals(sid, short_n, long_n):
                     else:
                         signals.append(f"🔄反2日(假跌破){label_str}")
                     has_signal = True
+                    signal_types.add("MA")
                 
                 if Y_close >= Y_ma and T_close < T_ma:
                     signals.append(f"跌破{label_str}[停損]")
                     has_signal = True
+                    signal_types.add("MA")
                 elif Y_close < Y_ma and T_close > T_ma and not any("假跌破" in s or "2日法則" in s for s in signals):
                     signals.append(f"突破{label_str}[進場1/2]")
                     has_signal = True
+                    signal_types.add("MA")
 
             # 2. 小箱型邏輯
             if not pd.isna(short_n):
@@ -181,12 +188,15 @@ def fetch_signals(sid, short_n, long_n):
                     if T_close > max(box_top, maST * 1.015) and c_vols[0] > c_vols[1] * 1.2:
                         signals.append("💎小箱型突破(表態)")
                         has_signal = True
+                        signal_types.add("MA")
                     elif T_close < min(box_bottom, maST * 0.985):
                         signals.append("📉小箱型失守")
                         has_signal = True
+                        signal_types.add("MA")
                     else:
                         signals.append("⌛延續小箱型(盤整中)")
                         has_signal = True
+                        signal_types.add("MA")
 
             # 3. 軌道一：【水平線】狀態精準判定
             res_line = get_resonance_line(cls if not is_fugle_active else cls[1:])
@@ -196,15 +206,18 @@ def fetch_signals(sid, short_n, long_n):
             if is_res_out:
                 signals.append(f"🎯[水平線:共振壓力]突破({res_line:.2f})")
                 has_signal = True
+                signal_types.add("HORIZONTAL")
             elif is_res_break:
                 signals.append(f"🎯[水平線:共振支撐]跌破({res_line:.2f})")
                 has_signal = True
+                signal_types.add("HORIZONTAL")
             elif abs(T_close - res_line) / res_line < 0.005:
                 if T_close >= res_line:
                     signals.append(f"🎯[水平線:共振支撐]接近({res_line:.2f})")
                 else:
                     signals.append(f"🎯[水平線:共振壓力]接近({res_line:.2f})")
                 has_signal = True
+                signal_types.add("HORIZONTAL")
 
             # 4. 軌道二：【斜線】趨勢線動態判定
             slopeH, slopeL = 0, 0
@@ -240,16 +253,20 @@ def fetch_signals(sid, short_n, long_n):
                 if Y_close < diagH_Yest and T_close >= diagH_Today:
                     signals.append(f"📐[斜線:趨勢壓力]突破({diagH_Today:.2f})")
                     has_signal = True
+                    signal_types.add("SLOPE")
                 elif Y_close >= diagL_Yest and T_close < diagL_Today:
                     signals.append(f"📐[斜線:趨勢支撐]跌破({diagL_Today:.2f})")
                     has_signal = True
+                    signal_types.add("SLOPE")
                 else:
                     if abs(T_close - diagH_Today) / diagH_Today < 0.005:
                         signals.append(f"📐[斜線:趨勢壓力]接近({diagH_Today:.2f})")
                         has_signal = True
+                        signal_types.add("SLOPE")
                     if abs(T_close - diagL_Today) / diagL_Today < 0.005:
                         signals.append(f"📐[斜線:趨勢支撐]接近({diagL_Today:.2f})")
                         has_signal = True
+                        signal_types.add("SLOPE")
 
             # 若富果活躍，將今日即時數據塞入最前端以便產出圖表
             if is_fugle_active:
@@ -300,7 +317,13 @@ def fetch_signals(sid, short_n, long_n):
             }
 
             if has_signal:
-                return {"price": T_close, "signal": " + ".join(signals), "vol": vol_tag, "plot_data": p_data}
+                return {
+                    "price": T_close, 
+                    "signal": " + ".join(signals), 
+                    "vol": vol_tag, 
+                    "plot_data": p_data,
+                    "signal_types": list(signal_types)  # 傳遞觸發的信號類型組合
+                }
                 
         except Exception: continue
     return None
@@ -345,7 +368,8 @@ def run_scan():
                             "長": int(ln_raw) if pd.notna(ln_raw) else "", 
                             "現價": f"{data['price']:.2f}",
                             "訊號": data['signal'], "量能": data['vol'],
-                            "plot_data": data.get("plot_data")
+                            "plot_data": data.get("plot_data"),
+                            "signal_types": data.get("signal_types", [])
                         })
                 except Exception: pass
 
@@ -355,7 +379,7 @@ def run_scan():
 
 st.title("🐯 金虎南：轉折監控系統 (智慧動態圖表版)")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"最後更新時間：{update_time}（快取60秒｜智慧連動：僅繪製觸發訊號的特定線條）")
+st.caption(f"最後更新時間：{update_time}（快取60秒｜智慧連動：精準繪製觸發線條與排除假日）")
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -373,7 +397,7 @@ if "data" not in st.session_state: st.session_state["data"] = run_scan()
 if st.session_state["data"]:
     st.subheader(f"📊 {TARGET_NAME} 監控結果 ({len(st.session_state['data'])} 檔觸發)")
     
-    df_display = pd.DataFrame(st.session_state["data"]).drop(columns=["plot_data"], errors="ignore")
+    df_display = pd.DataFrame(st.session_state["data"]).drop(columns=["plot_data", "signal_types"], errors="ignore")
     st.dataframe(df_display, use_container_width=True, hide_index=True)
     
     st.markdown("---")
@@ -382,6 +406,8 @@ if st.session_state["data"]:
     for item in st.session_state["data"]:
         p = item.get("plot_data")
         sig_text = item["訊號"]
+        sig_types = item.get("signal_types", [])
+        
         if p:
             with st.expander(f"🔍 {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
                 fig = go.Figure()
@@ -394,31 +420,40 @@ if st.session_state["data"]:
                     line_width=2.2, name='K線'
                 ))
                 
-                # ⚡ 判斷機制：只有訊號包含均線、2日、假跌破、小箱型時，才繪製均線
-                show_ma = any(k in sig_text for k in ["短(", "長(", "2日法則", "假跌破", "小箱型"])
-                if show_ma:
+                # ⚡ 修正後的繪圖機制：
+                # 如果該股票「同時觸發了多個不同類型的指標」，才把對應的指標一起畫在圖上。
+                # 如果只有單一類型訊號觸發，就只畫該類型的線條，確保畫面乾淨。
+                
+                # 均線繪製：訊號內包含 MA
+                if "MA" in sig_types:
                     if any(x is not None for x in p["ma_s"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=3.5)))
                     if any(x is not None for x in p["ma_l"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=3.5)))
                 
-                # ⚡ 判斷機制：只有訊號包含「水平線」時，才繪製水平共振壓力/支撐線
-                if "水平線" in sig_text:
+                # 水平共振線繪製：訊號內包含 HORIZONTAL
+                if "HORIZONTAL" in sig_types:
                     fig.add_trace(go.Scatter(x=p["dates"], y=p["res"], mode='lines', name='水平共振', line=dict(color='#BA55D3', width=3.5, dash='dash')))
                 
-                # ⚡ 判斷機制：只有訊號包含「斜線」時，才繪製趨勢斜線
-                if "斜線" in sig_text:
+                # 對稱趨勢斜線繪製：訊號內包含 SLOPE
+                if "SLOPE" in sig_types:
                     if any(x is not None for x in p["diagH"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["diagH"], mode='lines', name='趨勢壓力', line=dict(color='#B22222', width=3.5, dash='dot')))
                     if any(x is not None for x in p["diagL"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["diagL"], mode='lines', name='趨勢支撐', line=dict(color='#228B22', width=3.5, dash='dot')))
                 
-                # 圖表佈局優化
+                # 圖表佈局優化 & 🔴【核心修改：排除六日假日】
                 fig.update_layout(
                     xaxis_rangeslider_visible=False,
                     margin=dict(l=10, r=10, t=20, b=10),
                     height=380,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                )
+                
+                # 藉由 rangebreaks 移除週六 (sat) 與週日 (mon 之前) 的時間軸空白
+                fig.update_xaxes(
+                    type='date',
+                    rangebreaks=[dict(bounds=["sat", "mon"])]
                 )
                 
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
