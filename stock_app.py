@@ -20,9 +20,10 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- Google Sheet 設定 (已更新為你的新分頁 gid 與 工作表20) ---
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-TARGET_GID = "0"
-TARGET_NAME = "工作表1"
+TARGET_GID = "1426872214"
+TARGET_NAME = "工作表20"
 
 # 計算均線工具函數
 def get_ma(arr, period, offset=0):
@@ -119,7 +120,7 @@ def fetch_signals(sid, short_n, long_n):
             has_signal = False
             ma_list = [("短", short_n), ("長", long_n)]
             
-            # 用於判斷圖表畫線類型的標籤計數
+            # 用於精準控制圖表線條的類型
             signal_types = set()
 
             # 1. 均線與二日法則判定
@@ -322,7 +323,7 @@ def fetch_signals(sid, short_n, long_n):
                     "signal": " + ".join(signals), 
                     "vol": vol_tag, 
                     "plot_data": p_data,
-                    "signal_types": list(signal_types)  # 傳遞觸發的信號類型組合
+                    "signal_types": list(signal_types)
                 }
                 
         except Exception: continue
@@ -420,29 +421,26 @@ if st.session_state["data"]:
                     line_width=2.2, name='K線'
                 ))
                 
-                # ⚡ 修正後的繪圖機制：
-                # 如果該股票「同時觸發了多個不同類型的指標」，才把對應的指標一起畫在圖上。
-                # 如果只有單一類型訊號觸發，就只畫該類型的線條，確保畫面乾淨。
-                
-                # 均線繪製：訊號內包含 MA
+                # ⚡ 智慧畫線：只有觸發的訊號類型，才把對應的指標線繪製出來
+                # 均線繪製
                 if "MA" in sig_types:
                     if any(x is not None for x in p["ma_s"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=3.5)))
                     if any(x is not None for x in p["ma_l"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=3.5)))
                 
-                # 水平共振線繪製：訊號內包含 HORIZONTAL
+                # 水平共振線繪製
                 if "HORIZONTAL" in sig_types:
                     fig.add_trace(go.Scatter(x=p["dates"], y=p["res"], mode='lines', name='水平共振', line=dict(color='#BA55D3', width=3.5, dash='dash')))
                 
-                # 對稱趨勢斜線繪製：訊號內包含 SLOPE
+                # 對稱趨勢斜線繪製
                 if "SLOPE" in sig_types:
                     if any(x is not None for x in p["diagH"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["diagH"], mode='lines', name='趨勢壓力', line=dict(color='#B22222', width=3.5, dash='dot')))
                     if any(x is not None for x in p["diagL"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["diagL"], mode='lines', name='趨勢支撐', line=dict(color='#228B22', width=3.5, dash='dot')))
                 
-                # 圖表佈局優化 & 🔴【核心修改：排除六日假日】
+                # 圖表佈局優化
                 fig.update_layout(
                     xaxis_rangeslider_visible=False,
                     margin=dict(l=10, r=10, t=20, b=10),
@@ -450,10 +448,13 @@ if st.session_state["data"]:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 
-                # 藉由 rangebreaks 移除週六 (sat) 與週日 (mon 之前) 的時間軸空白
+                # 🔴【核心修改：徹底去除假日空白】
+                # 將 xaxis 類型強制指定為 'category'（類別型態）
+                # 這樣一來，中間沒有交易數據的六日就不會佔用任何空間，K線會完全黏在一起連續顯示。
                 fig.update_xaxes(
-                    type='date',
-                    rangebreaks=[dict(bounds=["sat", "mon"])]
+                    type='category',
+                    tickangle=-45,
+                    nticks=15  # 限制呈現的日期標籤數量，防文字重疊
                 )
                 
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
