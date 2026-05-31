@@ -20,10 +20,12 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- Google Sheet 設定 (已更新為你的新分頁 gid 與 工作表20) ---
+# --- Google Sheet 多分頁設定 (保留 gid=0，加入 gid=1426872214) ---
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
-TARGET_GID = "1426872214"
-TARGET_NAME = "工作表20"
+MONITOR_SHEETS = [
+    {"name": "金虎男主頁", "gid": "0"},
+    {"name": "工作表20", "gid": "1426872214"}
+]
 
 # 計算均線工具函數
 def get_ma(arr, period, offset=0):
@@ -158,7 +160,7 @@ def fetch_signals(sid, short_n, long_n):
                     else:
                         signals.append(f"🔄反2日(假跌破){label_str}")
                     has_signal = True
-                    signal_types.add("MA")
+                    signal_types.add("MA")  # 確保反2日會觸發畫均線
                 
                 if Y_close >= Y_ma and T_close < T_ma:
                     signals.append(f"跌破{label_str}[停損]")
@@ -189,7 +191,7 @@ def fetch_signals(sid, short_n, long_n):
                     if T_close > max(box_top, maST * 1.015) and c_vols[0] > c_vols[1] * 1.2:
                         signals.append("💎小箱型突破(表態)")
                         has_signal = True
-                        signal_types.add("MA")
+                        signal_types.add("MA")  # 小箱型突破跟隨短均線繪製
                     elif T_close < min(box_bottom, maST * 0.985):
                         signals.append("📉小箱型失守")
                         has_signal = True
@@ -197,7 +199,7 @@ def fetch_signals(sid, short_n, long_n):
                     else:
                         signals.append("⌛延續小箱型(盤整中)")
                         has_signal = True
-                        signal_types.add("MA")
+                        signal_types.add("MA")  # 確保盤整中的小箱型也會畫出均線
 
             # 3. 軌道一：【水平線】狀態精準判定
             res_line = get_resonance_line(cls if not is_fugle_active else cls[1:])
@@ -329,10 +331,9 @@ def fetch_signals(sid, short_n, long_n):
         except Exception: continue
     return None
 
-@st.cache_data(ttl=60, show_spinner=False)
-def run_scan():
+def run_scan_for_sheet(sheet_name, gid):
     results = []
-    csv_url = f"{SHEET_BASE}/export?format=csv&gid={TARGET_GID}&cb={int(time.time())}"
+    csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}&cb={int(time.time())}"
     try:
         res = requests.get(csv_url, timeout=10)
         res.encoding = 'utf-8'
@@ -340,6 +341,7 @@ def run_scan():
         
         tasks = []
         for _, row in df.iterrows():
+            if df.shape[1] < 4: continue
             sid_raw = row.iloc[0]
             if pd.isna(sid_raw): continue
             sid = str(sid_raw).strip()
@@ -364,6 +366,7 @@ def run_scan():
                     data = future.result()
                     if data:
                         results.append({
+                            "來源工作表": sheet_name,
                             "代號": sid, "名稱": name, 
                             "短": int(sn_raw) if pd.notna(sn_raw) else "",
                             "長": int(ln_raw) if pd.notna(ln_raw) else "", 
@@ -373,47 +376,57 @@ def run_scan():
                             "signal_types": data.get("signal_types", [])
                         })
                 except Exception: pass
-
-    except Exception as e: 
-        st.error(f"讀取 Google Sheet 失敗: {e}")
+    except Exception as e:
+        st.error(f"讀取分頁【{sheet_name}】失敗: {e}")
     return results
 
-st.title("🐯 金虎南：轉折監控系統 (智慧動態圖表版)")
+def run_all_scans():
+    all_results = []
+    for sheet in MONITOR_SHEETS:
+        sheet_res = run_scan_for_sheet(sheet["name"], sheet["gid"])
+        all_results.extend(sheet_res)
+    return all_results
+
+st.title("🐯 金虎南：轉折監控系統 (多工作表合流版)")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"最後更新時間：{update_time}（快取60秒｜智慧連動：精準繪製觸發線條與排除假日）")
+st.caption(f"最後更新時間：{update_time}（同時監控：金虎南主頁 + 工作表20｜已修正反2日與小箱型繪線邏輯）")
 
 col1, col2 = st.columns([1, 1])
 with col1:
-    if st.button("🔄 同步主表資料", use_container_width=True):
-        st.session_state["data"] = run_scan()
+    if st.button("🔄 同步所有分頁資料", use_container_width=True):
+        st.session_state["all_data"] = run_all_scans()
         st.rerun()
 with col2:
     if st.button("🚀 強制刷新即時報價", type="primary", use_container_width=True):
-        run_scan.clear()
         fetch_signals.clear()
-        st.session_state["data"] = run_scan()
+        st.session_state["all_data"] = run_all_scans()
         st.rerun()
 
-if "data" not in st.session_state: st.session_state["data"] = run_scan()
-if st.session_state["data"]:
-    st.subheader(f"📊 {TARGET_NAME} 監控結果 ({len(st.session_state['data'])} 檔觸發)")
+if "all_data" not in st.session_state: 
+    st.session_state["all_data"] = run_all_scans()
+
+if st.session_state["all_data"]:
+    st.subheader(f"📊 綜合監控結果 (共觸發 {len(st.session_state['all_data'])} 檔個股)")
     
-    df_display = pd.DataFrame(st.session_state["data"]).drop(columns=["plot_data", "signal_types"], errors="ignore")
+    df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data", "signal_types"], errors="ignore")
+    # 將來源工作表移到第一欄以便辨識
+    cols = ['來源工作表'] + [col for col in df_display.columns if col != '來源工作表']
+    df_display = df_display[cols]
     st.dataframe(df_display, use_container_width=True, hide_index=True)
     
     st.markdown("---")
-    st.subheader("📈 觸發個股 K 線軌道圖 (智慧連動顯示)")
+    st.subheader("📈 觸發個股 K 線軌道圖 (包含反2日、小箱型智慧均線)")
     
-    for item in st.session_state["data"]:
+    for item in st.session_state["all_data"]:
         p = item.get("plot_data")
         sig_text = item["訊號"]
         sig_types = item.get("signal_types", [])
         
         if p:
-            with st.expander(f"🔍 {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
+            with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
                 fig = go.Figure()
                 
-                # 1. 台灣標準 K 線 (上漲紅、下跌綠，邊框加粗)
+                # 1. 台灣標準 K 線 (去假日模式)
                 fig.add_trace(go.Candlestick(
                     x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
                     increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
@@ -421,8 +434,7 @@ if st.session_state["data"]:
                     line_width=2.2, name='K線'
                 ))
                 
-                # ⚡ 智慧畫線：只有觸發的訊號類型，才把對應的指標線繪製出來
-                # 均線繪製
+                # ⚡ 智慧畫線：反2日與小箱型均歸類於 "MA" 類型中，會完美畫出對應的長短均線
                 if "MA" in sig_types:
                     if any(x is not None for x in p["ma_s"]):
                         fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=3.5)))
@@ -448,15 +460,13 @@ if st.session_state["data"]:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 
-                # 🔴【核心修改：徹底去除假日空白】
-                # 將 xaxis 類型強制指定為 'category'（類別型態）
-                # 這樣一來，中間沒有交易數據的六日就不會佔用任何空間，K線會完全黏在一起連續顯示。
+                # 徹底去除假日空白
                 fig.update_xaxes(
                     type='category',
                     tickangle=-45,
-                    nticks=15  # 限制呈現的日期標籤數量，防文字重疊
+                    nticks=15
                 )
                 
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 else: 
-    st.info(f"目前 {TARGET_NAME} 監控名單中無觸發訊號。")
+    st.info("目前所有監控分頁中皆無觸發訊號。")
