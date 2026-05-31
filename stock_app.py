@@ -20,7 +20,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- Google Sheet 多分頁設定 (保留 gid=0，加入 gid=1426872214) ---
+# --- Google Sheet 多分頁設定 ---
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
 MONITOR_SHEETS = [
     {"name": "金虎男主頁", "gid": "0"},
@@ -32,7 +32,7 @@ def get_ma(arr, period, offset=0):
     sub = arr[offset:offset+period]
     return sum(sub) / period if len(sub) == period else None
 
-# 水平共振線計算邏輯 (找出過去60天最密集的價格區間)
+# 水平共振線計算邏輯
 def get_resonance_line(closes_list):
     data = closes_list[:60]
     if not data: return 0
@@ -56,7 +56,7 @@ def fetch_signals(sid, short_n, long_n):
         try:
             valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
             max_n = int(max(valid_ns) * 1.5) + 20 if valid_ns else 60
-            max_n = max(max_n, 90)  # 確保歷史數據足夠計算
+            max_n = max(max_n, 90)
             
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
             res = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
@@ -66,7 +66,6 @@ def fetch_signals(sid, short_n, long_n):
             quote = data['indicators']['quote'][0]
             timestamps = data.get('timestamp', [])
             
-            # 對齊並過濾無效數據
             raw_cls = quote.get('close', [])
             raw_high = quote.get('high', [])
             raw_low = quote.get('low', [])
@@ -86,7 +85,6 @@ def fetch_signals(sid, short_n, long_n):
                     else:
                         t_dates.append("")
                         
-            # 反轉數組，讓 index 0 代表最新的一天
             cls = t_cls[::-1]
             highs = t_highs[::-1]
             lows = t_lows[::-1]
@@ -121,9 +119,10 @@ def fetch_signals(sid, short_n, long_n):
             signals = []
             has_signal = False
             ma_list = [("短", short_n), ("長", long_n)]
-            
-            # 用於精準控制圖表線條的類型
             signal_types = set()
+            
+            # 箱型繪圖暫存坐標
+            box_coords = None
 
             # 1. 均線與二日法則判定
             for label, n in ma_list:
@@ -160,7 +159,7 @@ def fetch_signals(sid, short_n, long_n):
                     else:
                         signals.append(f"🔄反2日(假跌破){label_str}")
                     has_signal = True
-                    signal_types.add("MA")  # 確保反2日會觸發畫均線
+                    signal_types.add("MA")
                 
                 if Y_close >= Y_ma and T_close < T_ma:
                     signals.append(f"跌破{label_str}[停損]")
@@ -171,7 +170,7 @@ def fetch_signals(sid, short_n, long_n):
                     has_signal = True
                     signal_types.add("MA")
 
-            # 2. 小箱型邏輯
+            # 2. 小箱型邏輯 (計算最近三日範圍)
             if not pd.isna(short_n):
                 idx_offset = 1 if is_fugle_active else 2
                 c_highs = [T_high, Y_high, highs[idx_offset]]
@@ -188,20 +187,27 @@ def fetch_signals(sid, short_n, long_n):
                 if maST and is_touching(0) and is_touching(1) and is_touching(2):
                     box_top = max(c_highs)
                     box_bottom = min(c_closes)
+                    
+                    # 記錄箱型坐標 (供圖表渲染使用)
+                    box_coords = {"top": box_top, "bottom": box_bottom}
+                    
                     if T_close > max(box_top, maST * 1.015) and c_vols[0] > c_vols[1] * 1.2:
                         signals.append("💎小箱型突破(表態)")
                         has_signal = True
-                        signal_types.add("MA")  # 小箱型突破跟隨短均線繪製
+                        signal_types.add("MA")
+                        signal_types.add("BOX")
                     elif T_close < min(box_bottom, maST * 0.985):
                         signals.append("📉小箱型失守")
                         has_signal = True
                         signal_types.add("MA")
+                        signal_types.add("BOX")
                     else:
                         signals.append("⌛延續小箱型(盤整中)")
                         has_signal = True
-                        signal_types.add("MA")  # 確保盤整中的小箱型也會畫出均線
+                        signal_types.add("MA")
+                        signal_types.add("BOX")
 
-            # 3. 軌道一：【水平線】狀態精準判定
+            # 3. 水平線判定
             res_line = get_resonance_line(cls if not is_fugle_active else cls[1:])
             is_res_out = (Y_close < res_line and T_close >= res_line)
             is_res_break = (Y_close >= res_line and T_close < res_line)
@@ -222,7 +228,7 @@ def fetch_signals(sid, short_n, long_n):
                 has_signal = True
                 signal_types.add("HORIZONTAL")
 
-            # 4. 軌道二：【斜線】趨勢線動態判定
+            # 4. 斜線判定
             slopeH, slopeL = 0, 0
             hIdx1, hVal1, hIdx2, hVal2 = 0, 0, 0, 0
             lIdx1, lVal1, lIdx2, lVal2 = 0, 0, 0, 0
@@ -271,7 +277,6 @@ def fetch_signals(sid, short_n, long_n):
                         has_signal = True
                         signal_types.add("SLOPE")
 
-            # 若富果活躍，將今日即時數據塞入最前端以便產出圖表
             if is_fugle_active:
                 cls = [T_close] + cls
                 highs = [T_high] + highs
@@ -284,13 +289,7 @@ def fetch_signals(sid, short_n, long_n):
             if len(vols) >= 2 and vols[0] > vols[1] * 1.25:
                 vol_tag = "🔴量增"
 
-            # 預先生成 3 個月 (60天) 圖表所需的軌道數據線
-            plot_ma_short = []
-            plot_ma_long = []
-            plot_diagH = []
-            plot_diagL = []
-            plot_res = []
-            
+            plot_ma_short, plot_ma_long, plot_res, plot_diagH, plot_diagL = [], [], [], [], []
             for i in range(60):
                 if i >= len(cls): break
                 plot_ma_short.append(get_ma(cls, int(short_n), i) if pd.notna(short_n) else None)
@@ -325,9 +324,9 @@ def fetch_signals(sid, short_n, long_n):
                     "signal": " + ".join(signals), 
                     "vol": vol_tag, 
                     "plot_data": p_data,
-                    "signal_types": list(signal_types)
+                    "signal_types": list(signal_types),
+                    "box_coords": box_coords
                 }
-                
         except Exception: continue
     return None
 
@@ -366,14 +365,12 @@ def run_scan_for_sheet(sheet_name, gid):
                     data = future.result()
                     if data:
                         results.append({
-                            "來源工作表": sheet_name,
-                            "代號": sid, "名稱": name, 
+                            "來源工作表": sheet_name, "代號": sid, "名稱": name, 
                             "短": int(sn_raw) if pd.notna(sn_raw) else "",
                             "長": int(ln_raw) if pd.notna(ln_raw) else "", 
-                            "現價": f"{data['price']:.2f}",
-                            "訊號": data['signal'], "量能": data['vol'],
-                            "plot_data": data.get("plot_data"),
-                            "signal_types": data.get("signal_types", [])
+                            "現價": f"{data['price']:.2f}", "訊號": data['signal'], "量能": data['vol'],
+                            "plot_data": data.get("plot_data"), "signal_types": data.get("signal_types", []),
+                            "box_coords": data.get("box_coords")
                         })
                 except Exception: pass
     except Exception as e:
@@ -383,13 +380,12 @@ def run_scan_for_sheet(sheet_name, gid):
 def run_all_scans():
     all_results = []
     for sheet in MONITOR_SHEETS:
-        sheet_res = run_scan_for_sheet(sheet["name"], sheet["gid"])
-        all_results.extend(sheet_res)
+        all_results.extend(run_scan_for_sheet(sheet["name"], sheet["gid"]))
     return all_results
 
-st.title("🐯 金虎南：轉折監控系統 (多工作表合流版)")
+st.title("🐯 金虎南：轉折監控系統 (多分頁合流細線版)")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"最後更新時間：{update_time}（同時監控：金虎南主頁 + 工作表20｜已修正反2日與小箱型繪線邏輯）")
+st.caption(f"最後更新時間：{update_time}（主頁+工作表20連動｜已修正細線化與半透明箱型區塊顯示）")
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -402,25 +398,22 @@ with col2:
         st.session_state["all_data"] = run_all_scans()
         st.rerun()
 
-if "all_data" not in st.session_state: 
-    st.session_state["all_data"] = run_all_scans()
+if "all_data" not in st.session_state: st.session_state["all_data"] = run_all_scans()
 
 if st.session_state["all_data"]:
     st.subheader(f"📊 綜合監控結果 (共觸發 {len(st.session_state['all_data'])} 檔個股)")
-    
-    df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data", "signal_types"], errors="ignore")
-    # 將來源工作表移到第一欄以便辨識
+    df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data", "signal_types", "box_coords"], errors="ignore")
     cols = ['來源工作表'] + [col for col in df_display.columns if col != '來源工作表']
-    df_display = df_display[cols]
-    st.dataframe(df_display, use_container_width=True, hide_index=True)
+    st.dataframe(df_display[cols], use_container_width=True, hide_index=True)
     
     st.markdown("---")
-    st.subheader("📈 觸發個股 K 線軌道圖 (包含反2日、小箱型智慧均線)")
+    st.subheader("📈 觸發個股 K 線軌道圖 (包含精細指標線與實體箱型)")
     
     for item in st.session_state["all_data"]:
         p = item.get("plot_data")
         sig_text = item["訊號"]
         sig_types = item.get("signal_types", [])
+        bc = item.get("box_coords")
         
         if p:
             with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
@@ -431,26 +424,37 @@ if st.session_state["all_data"]:
                     x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
                     increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
                     decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
-                    line_width=2.2, name='K線'
+                    line_width=1.8, name='K線'
                 ))
                 
-                # ⚡ 智慧畫線：反2日與小箱型均歸類於 "MA" 類型中，會完美畫出對應的長短均線
+                # 📌 2. 實體箱型區塊渲染 (若有觸發小箱型且坐標存在，繪製最近3日的陰影矩形)
+                if "BOX" in sig_types and bc and len(p["dates"]) >= 3:
+                    # 取得最後三天的日期作為箱型左右邊界
+                    box_x = p["dates"][-3:]
+                    fig.add_shape(
+                        type="rect",
+                        x0=box_x[0], x1=box_x[-1],
+                        y0=bc["bottom"], y1=bc["top"],
+                        fillcolor="rgba(30, 144, 255, 0.15)",  # 半透明寶藍色背景
+                        line=dict(color="rgba(30, 144, 255, 0.8)", width=1.5, dash="dash"), # 箱型邊框
+                        layer="below"
+                    )
+                
+                # ⚡ 3. 智慧畫線 (寬度全部精細化至 1.8 ~ 2.0)
                 if "MA" in sig_types:
                     if any(x is not None for x in p["ma_s"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=3.5)))
+                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
                     if any(x is not None for x in p["ma_l"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=3.5)))
+                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
                 
-                # 水平共振線繪製
                 if "HORIZONTAL" in sig_types:
-                    fig.add_trace(go.Scatter(x=p["dates"], y=p["res"], mode='lines', name='水平共振', line=dict(color='#BA55D3', width=3.5, dash='dash')))
+                    fig.add_trace(go.Scatter(x=p["dates"], y=p["res"], mode='lines', name='水平共振', line=dict(color='#BA55D3', width=1.8, dash='dash')))
                 
-                # 對稱趨勢斜線繪製
                 if "SLOPE" in sig_types:
                     if any(x is not None for x in p["diagH"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["diagH"], mode='lines', name='趨勢壓力', line=dict(color='#B22222', width=3.5, dash='dot')))
+                        fig.add_trace(go.Scatter(x=p["dates"], y=p["diagH"], mode='lines', name='趨勢壓力', line=dict(color='#B22222', width=1.8, dash='dot')))
                     if any(x is not None for x in p["diagL"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["diagL"], mode='lines', name='趨勢支撐', line=dict(color='#228B22', width=3.5, dash='dot')))
+                        fig.add_trace(go.Scatter(x=p["dates"], y=p["diagL"], mode='lines', name='趨勢支撐', line=dict(color='#228B22', width=1.8, dash='dot')))
                 
                 # 圖表佈局優化
                 fig.update_layout(
@@ -461,12 +465,7 @@ if st.session_state["all_data"]:
                 )
                 
                 # 徹底去除假日空白
-                fig.update_xaxes(
-                    type='category',
-                    tickangle=-45,
-                    nticks=15
-                )
-                
+                fig.update_xaxes(type='category', tickangle=-45, nticks=15)
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 else: 
     st.info("目前所有監控分頁中皆無觸發訊號。")
