@@ -4,6 +4,7 @@ import requests
 import io
 import time
 import concurrent.futures  # 導入多執行緒平行加速庫
+import plotly.graph_objects as go  # 導入進階圖表庫
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-轉折監控")
@@ -52,7 +53,7 @@ def fetch_signals(sid, short_n, long_n):
         try:
             valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
             max_n = int(max(valid_ns) * 1.5) + 20 if valid_ns else 60
-            max_n = max(max_n, 90)  # 確保至少有 90 天以上的歷史數據來精準計算斜線與水平線
+            max_n = max(max_n, 90)  # 確保歷史數據足夠計算
             
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
             res = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
@@ -60,12 +61,35 @@ def fetch_signals(sid, short_n, long_n):
                 
             data = res.json()['chart']['result'][0]
             quote = data['indicators']['quote'][0]
+            timestamps = data.get('timestamp', [])
             
-            # 過濾 None 並反轉數組，讓 index 0 代表最新的一天
-            cls = [p for p in quote['close'] if p is not None][::-1]
-            highs = [h for h in quote['high'] if h is not None][::-1]
-            lows = [l for l in quote['low'] if l is not None][::-1]
-            vols = [v for v in quote['volume'] if v is not None][::-1]
+            # 對齊並過濾無效數據
+            raw_cls = quote.get('close', [])
+            raw_high = quote.get('high', [])
+            raw_low = quote.get('low', [])
+            raw_op = quote.get('open', [])
+            raw_vol = quote.get('volume', [])
+            
+            t_cls, t_highs, t_lows, t_opens, t_vols, t_dates = [], [], [], [], [], []
+            for i in range(len(raw_cls)):
+                if raw_cls[i] is not None and raw_high[i] is not None and raw_low[i] is not None and raw_op[i] is not None:
+                    t_cls.append(raw_cls[i])
+                    t_highs.append(raw_high[i])
+                    t_lows.append(raw_low[i])
+                    t_opens.append(raw_op[i])
+                    t_vols.append(raw_vol[i] if raw_vol[i] is not None else 0)
+                    if i < len(timestamps):
+                        t_dates.append(time.strftime('%Y-%m-%d', time.localtime(timestamps[i])))
+                    else:
+                        t_dates.append("")
+                        
+            # 反轉數組，讓 index 0 代表最新的一天
+            cls = t_cls[::-1]
+            highs = t_highs[::-1]
+            lows = t_lows[::-1]
+            opens = t_opens[::-1]
+            vols = t_vols[::-1]
+            dates = t_dates[::-1]
             
             if len(cls) < 60: continue
 
@@ -114,7 +138,6 @@ def fetch_signals(sid, short_n, long_n):
                 trend = "⬆️" if T_ma > Y_ma else "↘️"
                 label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
                 
-                # 2日確認法則
                 is_yesterday_breakout = (B_close < B_ma and Y_close > Y_ma)
                 is_today_away = (T_low > T_ma)
                 is_higher_than_yesterday = (T_close > Y_close)
@@ -123,7 +146,6 @@ def fetch_signals(sid, short_n, long_n):
                     signals.append(f"🔥2日法則(強勢突破){label_str}")
                     has_signal = True
                 
-                # 反2日假跌破
                 y_break = (Y_close < Y_ma and B_close >= B_ma)
                 if y_break and T_close > T_ma:
                     if (T_close - T_ma) / T_ma > 0.005:
@@ -132,7 +154,6 @@ def fetch_signals(sid, short_n, long_n):
                         signals.append(f"🔄反2日(假跌破){label_str}")
                     has_signal = True
                 
-                # 普通突破 / 跌破
                 if Y_close >= Y_ma and T_close < T_ma:
                     signals.append(f"跌破{label_str}[停損]")
                     has_signal = True
@@ -168,7 +189,7 @@ def fetch_signals(sid, short_n, long_n):
                         has_signal = True
 
             # 3. 軌道一：【水平線】狀態精準判定
-            res_line = get_resonance_line(cls)
+            res_line = get_resonance_line(cls if not is_fugle_active else cls[1:])
             is_res_out = (Y_close < res_line and T_close >= res_line)
             is_res_break = (Y_close >= res_line and T_close < res_line)
             
@@ -186,6 +207,10 @@ def fetch_signals(sid, short_n, long_n):
                 has_signal = True
 
             # 4. 軌道二：【斜線】趨勢線動態判定
+            slopeH, slopeL = 0, 0
+            hIdx1, hVal1, hIdx2, hVal2 = 0, 0, 0, 0
+            lIdx1, lVal1, lIdx2, lVal2 = 0, 0, 0, 0
+            
             if len(highs) >= 51 and len(lows) >= 51:
                 hIdx1, hVal1 = 1, highs[1]
                 for i in range(2, 21):
@@ -226,86 +251,33 @@ def fetch_signals(sid, short_n, long_n):
                         signals.append(f"📐[斜線:趨勢支撐]接近({diagL_Today:.2f})")
                         has_signal = True
 
+            # 若富果活躍，將今日即時數據塞入最前端以便產出圖表
+            if is_fugle_active:
+                cls = [T_close] + cls
+                highs = [T_high] + highs
+                lows = [T_low] + lows
+                opens = [f_data.get('open', T_close)] + opens
+                dates = [time.strftime('%Y-%m-%d')] + dates
+                vols = [f_data.get('volume', 0)] + vols
+
             vol_tag = ""
             if len(vols) >= 2 and vols[0] > vols[1] * 1.25:
                 vol_tag = "🔴量增"
 
-            if has_signal:
-                return {"price": T_close, "signal": " + ".join(signals), "vol": vol_tag}
+            # 預先生成 3 個月 (60天) 圖表所需的軌道數據線
+            plot_ma_short = []
+            plot_ma_long = []
+            plot_diagH = []
+            plot_diagL = []
+            plot_res = []
+            
+            for i in range(60):
+                if i >= len(cls): break
+                plot_ma_short.append(get_ma(cls, int(short_n), i) if pd.notna(short_n) else None)
+                plot_ma_long.append(get_ma(cls, int(long_n), i) if pd.notna(long_n) else None)
+                plot_res.append(res_line)
                 
-        except Exception: continue
-    return None
-
-@st.cache_data(ttl=60, show_spinner=False)
-def run_scan():
-    results = []
-    csv_url = f"{SHEET_BASE}/export?format=csv&gid={TARGET_GID}&cb={int(time.time())}"
-    try:
-        res = requests.get(csv_url, timeout=10)
-        res.encoding = 'utf-8'
-        df = pd.read_csv(io.StringIO(res.text))
-        
-        # 建立平行任務清單
-        tasks = []
-        for _, row in df.iterrows():
-            sid_raw = row.iloc[0]
-            if pd.isna(sid_raw): continue
-            sid = str(sid_raw).strip()
-            if sid.replace('.', '').replace('-', '').isdigit():
-                sid = str(int(float(sid)))
-            
-            sn_raw = pd.to_numeric(row.iloc[2], errors='coerce')
-            ln_raw = pd.to_numeric(row.iloc[3], errors='coerce')
-            name = row.iloc[1]
-            tasks.append((sid, sn_raw, ln_raw, name))
-            
-        # ⚡ 核心優化：改為展開式迴圈，徹底防止複製時長代碼被截斷
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_stock = {}
-            for t in tasks:
-                f_obj = executor.submit(fetch_signals, t[0], t[1], t[2])
-                future_to_stock[f_obj] = t
-            
-            # 當任務完成時回收結果
-            for future in concurrent.futures.as_completed(future_to_stock):
-                t = future_to_stock[future]
-                sid, sn_raw, ln_raw, name = t[0], t[1], t[2], t[3]
-                try:
-                    data = future.result()
-                    if data:
-                        results.append({
-                            "代號": sid, "名稱": name, 
-                            "短": int(sn_raw) if pd.notna(sn_raw) else "",
-                            "長": int(ln_raw) if pd.notna(ln_raw) else "", 
-                            "現價": f"{data['price']:.2f}",
-                            "訊號": data['signal'], "量能": data['vol']
-                        })
-                except Exception:
-                    pass
-
-    except Exception as e: 
-        st.error(f"讀取 Google Sheet 失敗: {e}")
-    return results
-
-st.title("🐯 金虎南：轉折監控系統 (主表平行加速版)")
-update_time = time.strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"最後更新時間：{update_time}（快取60秒｜支援水平/斜線雙軌辨識與多執行緒並行）")
-
-col1, col2 = st.columns([1, 1])
-with col1:
-    if st.button("🔄 同步主表資料", use_container_width=True):
-        st.session_state["data"] = run_scan()
-        st.rerun()
-with col2:
-    if st.button("🚀 強制刷新即時報價", type="primary", use_container_width=True):
-        run_scan.clear()
-        fetch_signals.clear()
-        st.session_state["data"] = run_scan()
-        st.rerun()
-
-if "data" not in st.session_state: st.session_state["data"] = run_scan()
-if st.session_state["data"]:
-    st.subheader(f"📊 {TARGET_NAME} 監控結果 ({len(st.session_state['data'])} 檔觸發)")
-    st.dataframe(pd.DataFrame(st.session_state["data"]), use_container_width=True, hide_index=True)
-else: 
-    st.info(f"目前 {TARGET_NAME} 監控名單中無觸發訊號。")
+                if len(highs) >= 51:
+                    hist_idx = (i - 1) if is_fugle_active else i
+                    plot_diagH.append(hVal1 + slopeH * (hist_idx - hIdx1))
+                    plot_
