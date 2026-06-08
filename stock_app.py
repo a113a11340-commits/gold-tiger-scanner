@@ -252,12 +252,14 @@ with col2:
 
 if "all_data" in st.session_state and st.session_state["all_data"]:
     st.subheader(f"📊 綜合監控結果 (共觸發 {len(st.session_state['all_data'])} 檔個股)")
-    df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data", "signal_types"], errors="ignore")
+    # 移除短、長欄位後的顯示
+    df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data", "signal_types", "短", "長"], errors="ignore")
+    # 重新排列順序確保來源工作表在前
     cols = ['來源工作表'] + [col for col in df_display.columns if col != '來源工作表']
     st.dataframe(df_display[cols], use_container_width=True, hide_index=True)
     
     st.markdown("---")
-    st.subheader("📈 觸發個股 K 線軌道圖")
+    st.subheader("📈 觸發個股 K 線軌道圖 (純均線軌道指標)")
     
     for item in st.session_state["all_data"]:
         p = item.get("plot_data")
@@ -265,31 +267,31 @@ if "all_data" in st.session_state and st.session_state["all_data"]:
         sig_types = item.get("signal_types", [])
         
         if p:
-            st.write(f"**[{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】**")
-            fig = go.Figure()
-            
-            fig.add_trace(go.Candlestick(
-                x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
-                increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
-                decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
-                line_width=1.8, name='K線'
-            ))
-            
-            if "MA" in sig_types:
-                if any(x is not None for x in p["ma_s"]):
-                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
-                if any(x is not None for x in p["ma_l"]):
-                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
-            
-            fig.update_layout(
-                xaxis_rangeslider_visible=False,
-                margin=dict(l=10, r=10, t=20, b=10),
-                height=380,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-            )
-            
-            fig.update_xaxes(type='category', tickangle=-45, nticks=15)
-            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
-            st.markdown("---")
+            # 恢復原本的 expander 摺疊顯示
+            with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
+                fig = go.Figure()
+                
+                fig.add_trace(go.Candlestick(
+                    x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
+                    increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
+                    decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
+                    line_width=1.8, name='K線'
+                ))
+                
+                if "MA" in sig_types:
+                    if any(x is not None for x in p["ma_s"]):
+                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
+                    if any(x is not None for x in p["ma_l"]):
+                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
+                
+                fig.update_layout(
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    height=380,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                )
+                
+                fig.update_xaxes(type='category', tickangle=-45, nticks=15)
+                st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 elif "all_data" in st.session_state:
     st.info("目前所有監控分頁中皆無觸發訊號。")
