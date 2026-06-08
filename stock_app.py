@@ -3,8 +3,8 @@ import pandas as pd
 import requests
 import io
 import time
-import concurrent.futures  # 導入多執行緒平行加速庫
-import plotly.graph_objects as go  # 導入進階圖表庫
+import concurrent.futures
+import plotly.graph_objects as go
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
@@ -27,7 +27,6 @@ MONITOR_SHEETS = [
     {"name": "工作表20", "gid": "1426872214"}
 ]
 
-# 計算均線工具函數
 def get_ma(arr, period, offset=0):
     sub = arr[offset:offset+period]
     return sum(sub) / period if len(sub) == period else None
@@ -38,7 +37,6 @@ def fetch_signals(sid, short_n, long_n):
     for sfx in suffixes:
         try:
             valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
-            # 移除斜線與共振後，天期大幅縮減，滿足最大均線與畫圖所須的 60 天即可
             max_n = max(int(max(valid_ns)) + 10 if valid_ns else 30, 60)
             
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
@@ -78,7 +76,6 @@ def fetch_signals(sid, short_n, long_n):
             req_len = int(max(valid_ns)) + 3 if valid_ns else 10
             if len(cls) < req_len: continue
 
-            # --- 獲取即時價格 (富果 API) ---
             f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
             f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
             
@@ -105,7 +102,6 @@ def fetch_signals(sid, short_n, long_n):
             ma_list = [("短", short_n), ("長", long_n)]
             signal_types = set()
             
-            # 核心：均線與二日法則判定
             for label, n in ma_list:
                 if pd.isna(n): continue
                 n = int(n)
@@ -227,8 +223,6 @@ def run_scan_for_sheet(sheet_name, gid):
                     if data:
                         results.append({
                             "來源工作表": sheet_name, "代號": sid, "名稱": name, 
-                            "短": int(sn_raw) if pd.notna(sn_raw) else "",
-                            "長": int(ln_raw) if pd.notna(ln_raw) else "", 
                             "現價": f"{data['price']:.2f}", "訊號": data['signal'], "量能": data['vol'],
                             "plot_data": data.get("plot_data"), "signal_types": data.get("signal_types", [])
                         })
@@ -245,29 +239,25 @@ def run_all_scans():
 
 st.title("🐯 金虎南：轉折監控系統 (純均線與2日法則版)")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"最後更新時間：{update_time}（主頁+工作表20連動｜已移除小箱型、共振線、動態斜線）")
+st.caption(f"最後更新時間：{update_time}")
 
 col1, col2 = st.columns([1, 1])
 with col1:
     if st.button("🔄 同步所有分頁資料", use_container_width=True):
         st.session_state["all_data"] = run_all_scans()
-        st.rerun()
 with col2:
     if st.button("🚀 強制刷新即時報價", type="primary", use_container_width=True):
         fetch_signals.clear()
         st.session_state["all_data"] = run_all_scans()
-        st.rerun()
 
-if "all_data" not in st.session_state: st.session_state["all_data"] = run_all_scans()
-
-if st.session_state["all_data"]:
+if "all_data" in st.session_state and st.session_state["all_data"]:
     st.subheader(f"📊 綜合監控結果 (共觸發 {len(st.session_state['all_data'])} 檔個股)")
     df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data", "signal_types"], errors="ignore")
     cols = ['來源工作表'] + [col for col in df_display.columns if col != '來源工作表']
     st.dataframe(df_display[cols], use_container_width=True, hide_index=True)
     
     st.markdown("---")
-    st.subheader("📈 觸發個股 K 線軌道圖 (純均線軌道指標)")
+    st.subheader("📈 觸發個股 K 線軌道圖")
     
     for item in st.session_state["all_data"]:
         p = item.get("plot_data")
@@ -275,34 +265,31 @@ if st.session_state["all_data"]:
         sig_types = item.get("signal_types", [])
         
         if p:
-            with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
-                fig = go.Figure()
-                
-                # 1. 台灣標準 K 線 (去假日模式)
-                fig.add_trace(go.Candlestick(
-                    x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
-                    increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
-                    decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
-                    line_width=1.8, name='K線'
-                ))
-                
-                # 2. 均線繪製 (只保留短/長均線軌道)
-                if "MA" in sig_types:
-                    if any(x is not None for x in p["ma_s"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
-                    if any(x is not None for x in p["ma_l"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
-                
-                # 圖表佈局優化
-                fig.update_layout(
-                    xaxis_rangeslider_visible=False,
-                    margin=dict(l=10, r=10, t=20, b=10),
-                    height=380,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-                )
-                
-                # 徹底去除假日空白
-                fig.update_xaxes(type='category', tickangle=-45, nticks=15)
-                st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
-else: 
+            st.write(f"**[{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】**")
+            fig = go.Figure()
+            
+            fig.add_trace(go.Candlestick(
+                x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
+                increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
+                decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
+                line_width=1.8, name='K線'
+            ))
+            
+            if "MA" in sig_types:
+                if any(x is not None for x in p["ma_s"]):
+                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
+                if any(x is not None for x in p["ma_l"]):
+                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
+            
+            fig.update_layout(
+                xaxis_rangeslider_visible=False,
+                margin=dict(l=10, r=10, t=20, b=10),
+                height=380,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            )
+            
+            fig.update_xaxes(type='category', tickangle=-45, nticks=15)
+            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
+            st.markdown("---")
+elif "all_data" in st.session_state:
     st.info("目前所有監控分頁中皆無觸發訊號。")
