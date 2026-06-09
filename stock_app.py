@@ -10,14 +10,12 @@ st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
 
-# 加大字體
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
-    body, p, div, span, h1, h2, h3, h4 { font-size: 1.15rem !important; }
     table { width: 100% !important; font-size: 24px !important; }
-    th, td { font-size: 24px !important; padding: 14px 8px !important; line-height: 1.45 !important; }
-    th { background-color: #f0f2f6 !important; font-weight: bold; }
+    th, td { font-size: 24px !important; padding: 14px 8px !important; }
+    th { background-color: #f0f2f6 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -55,7 +53,6 @@ def fetch_signals(sid, short_n, long_n):
 
             if len(cls) < 20: continue
 
-            # 富果即時價
             f_res = requests.get(f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}", 
                                headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
             
@@ -116,15 +113,15 @@ def fetch_signals(sid, short_n, long_n):
 
             vol_tag = "🔴量增" if len(vols) >= 2 and vols[0] > vols[1] * 1.25 else ""
 
-            # K線圖資料 - 使用簡單序號，避免顯示錯誤
-            slice_len = min(60, len(cls) + (1 if is_fugle_active else 0))
-            dummy_dates = list(range(slice_len))
+            # K線圖 - 使用簡單序號避免畫壞
+            slice_len = min(60, len(cls) + 1)
+            dummy_x = list(range(slice_len))
 
             p_data = {
-                "dates": dummy_dates,
+                "dates": dummy_x,
                 "opens": [0] * slice_len,
                 "highs": highs[:slice_len][::-1] if highs else [T_close] * slice_len,
-                "lows": lows[:slice_len][::-1] if lows else [T_close * 0.95] * slice_len,
+                "lows": lows[:slice_len][::-1] if lows else [T_close*0.98] * slice_len,
                 "closes": ([T_close] + cls)[:slice_len][::-1] if is_fugle_active else cls[:slice_len][::-1],
                 "ma_s": [get_ma([T_close] + cls if is_fugle_active else cls, int(short_n), i) if pd.notna(short_n) else None for i in range(slice_len)],
                 "ma_l": [get_ma([T_close] + cls if is_fugle_active else cls, int(long_n), i) if pd.notna(long_n) else None for i in range(slice_len)]
@@ -141,7 +138,7 @@ def fetch_signals(sid, short_n, long_n):
             continue
     return None
 
-# run_scan_for_sheet 和 run_all_scans（保持不變）
+# 掃描函數（保持不變）
 def run_scan_for_sheet(sheet_name, gid):
     results = []
     csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}&cb={int(time.time())}"
@@ -215,7 +212,7 @@ if st.session_state["all_data"]:
     
     df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data"], errors="ignore")
     
-    # 突破紅色、跌破綠色
+    # 只讓「突破」紅色、「跌破」綠色
     def color_signal(val):
         if isinstance(val, str):
             if "突破" in val:
@@ -232,7 +229,7 @@ if st.session_state["all_data"]:
     
     for item in st.session_state["all_data"]:
         p = item.get("plot_data")
-        if p and len(p["closes"]) > 5:
+        if p:
             with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item.get('名稱','')} — 【{item['訊號']}】", expanded=False):
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(
@@ -245,19 +242,20 @@ if st.session_state["all_data"]:
                     increasing_fillcolor='#FF3333',
                     decreasing_line_color='#00A600', 
                     decreasing_fillcolor='#00A600',
-                    line_width=1.8, 
-                    name='K線'
+                    line_width=1.5, name='K線'
                 ))
-                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=2)))
-                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=2)))
+                if p.get("ma_s"):
+                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=2)))
+                if p.get("ma_l"):
+                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=2)))
                 
                 fig.update_layout(
                     xaxis_rangeslider_visible=False,
+                    height=420,
                     margin=dict(l=10, r=10, t=30, b=10),
-                    height=450,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
-                fig.update_xaxes(showticklabels=False)   # 不顯示日期
-                st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
+                fig.update_xaxes(showticklabels=False)
+                st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("目前所有監控分頁中皆無觸發訊號。")
