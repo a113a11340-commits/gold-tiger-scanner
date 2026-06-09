@@ -1,4 +1,3 @@
-cat > /home/workdir/attachments/stock_app.py << 'EOF'
 import streamlit as st
 import pandas as pd
 import requests
@@ -7,8 +6,10 @@ import time
 import concurrent.futures
 import plotly.graph_objects as go
 
+# --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 
+# --- 富果 API 設定 ---
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
 
 st.markdown("""
@@ -19,12 +20,14 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- Google Sheet 多分頁設定 ---
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
 MONITOR_SHEETS = [
     {"name": "金虎男主頁", "gid": "0"},
     {"name": "工作表20", "gid": "1426872214"}
 ]
 
+# 計算均線工具函數
 def get_ma(arr, period, offset=0):
     sub = arr[offset:offset+period]
     return sum(sub) / period if len(sub) == period else None
@@ -74,6 +77,7 @@ def fetch_signals(sid, short_n, long_n):
             req_len = int(max(valid_ns)) + 3 if valid_ns else 10
             if len(cls) < req_len: continue
 
+            # --- 獲取即時價格 (富果 API) ---
             f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
             f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
             
@@ -273,6 +277,7 @@ if st.session_state["all_data"]:
         if p:
             with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
                 fig = go.Figure()
+                
                 fig.add_trace(go.Candlestick(
                     x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
                     increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
@@ -292,8 +297,8 @@ if st.session_state["all_data"]:
                     height=380,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
+                
                 fig.update_xaxes(type='category', tickangle=-45, nticks=15)
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 else: 
     st.info("目前所有監控分頁中皆無觸發訊號。")
-EOF
