@@ -187,8 +187,7 @@ def fetch_signals(sid, short_n, long_n):
                     "plot_data": p_data,
                     "signal_types": list(signal_types)
                 }
-        except Exception:
-            continue
+        except Exception: continue
     return None
 
 def run_scan_for_sheet(sheet_name, gid):
@@ -268,7 +267,7 @@ if st.session_state["all_data"]:
     )
     cols = ['來源工作表'] + [col for col in df_display.columns if col != '來源工作表']
     
-    st.table(df_display[cols])   # ← 完全展開顯示
+    st.table(df_display[cols])   # 完全展開顯示，無滑動條
     
     st.markdown("---")
     st.subheader("📈 觸發個股 K 線軌道圖 (純均線軌道指標)")
