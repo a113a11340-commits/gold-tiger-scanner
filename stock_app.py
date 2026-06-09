@@ -11,7 +11,7 @@ st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
 
-# === 加大字體 + 紅色突破 ===
+# 加大字體
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
@@ -52,10 +52,7 @@ def fetch_signals(sid, short_n, long_n):
             raw_low = [x for x in quote.get('low', []) if x is not None]
             raw_vol = [x for x in quote.get('volume', []) if x is not None]
 
-            # 轉換日期
-            dates = []
-            for ts in timestamps[:len(raw_cls)]:
-                dates.append(time.strftime('%Y-%m-%d', time.localtime(ts)))
+            dates = [time.strftime('%Y-%m-%d', time.localtime(ts)) for ts in timestamps[:len(raw_cls)]]
             
             cls = raw_cls[::-1]
             highs = raw_high[::-1]
@@ -65,7 +62,6 @@ def fetch_signals(sid, short_n, long_n):
 
             if len(cls) < 20: continue
 
-            # 富果即時價格
             f_res = requests.get(f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}", 
                                headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
             
@@ -126,7 +122,7 @@ def fetch_signals(sid, short_n, long_n):
 
             vol_tag = "🔴量增" if len(vols) >= 2 and vols[0] > vols[1] * 1.25 else ""
 
-            # K線圖資料（修正日期）
+            # K線圖資料
             plot_ma_short = [get_ma([T_close] + cls if is_fugle_active else cls, int(short_n), i) if pd.notna(short_n) else None for i in range(60)]
             plot_ma_long = [get_ma([T_close] + cls if is_fugle_active else cls, int(long_n), i) if pd.notna(long_n) else None for i in range(60)]
 
@@ -154,7 +150,6 @@ def fetch_signals(sid, short_n, long_n):
             continue
     return None
 
-# 其餘函數（run_scan_for_sheet、run_all_scans）保持不變...
 def run_scan_for_sheet(sheet_name, gid):
     results = []
     csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}&cb={int(time.time())}"
@@ -205,7 +200,7 @@ def run_all_scans():
         all_results.extend(run_scan_for_sheet(sheet["name"], sheet["gid"]))
     return all_results
 
-# 主畫面
+# --- 主畫面 ---
 st.title("🐯 金虎南：轉折監控系統 (純均線與2日法則版)")
 st.caption("最後更新時間：" + time.strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -225,9 +220,18 @@ if "all_data" not in st.session_state:
 
 if st.session_state["all_data"]:
     st.subheader(f"📊 綜合監控結果 (共觸發 {len(st.session_state['all_data'])} 檔個股)")
+    
     df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data"], errors="ignore")
-    st.table(df_display)
-
+    
+    # 讓「突破」變紅色（表格內）
+    def color_breakthrough(val):
+        if isinstance(val, str) and "突破" in val:
+            return f'<span style="color:red; font-weight:bold;">{val}</span>'
+        return val
+    
+    df_display['訊號'] = df_display['訊號'].apply(color_breakthrough)
+    st.html(df_display.to_html(escape=False, index=False))
+    
     st.markdown("---")
     st.subheader("📈 觸發個股 K 線軌道圖")
     
@@ -242,13 +246,13 @@ if st.session_state["all_data"]:
                     decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
                     line_width=1.8, name='K線'
                 ))
-                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
-                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
+                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=2)))
+                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=2)))
                 
                 fig.update_layout(
                     xaxis_rangeslider_visible=False,
-                    margin=dict(l=10, r=10, t=20, b=10),
-                    height=420,
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    height=450,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 fig.update_xaxes(type='category', tickangle=-45)
