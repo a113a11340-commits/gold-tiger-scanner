@@ -6,7 +6,6 @@ import time
 import concurrent.futures
 import plotly.graph_objects as go
 
-# --- 基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
@@ -19,11 +18,9 @@ st.markdown("""
     table { width: 100% !important; font-size: 24px !important; }
     th, td { font-size: 24px !important; padding: 14px 8px !important; line-height: 1.45 !important; }
     th { background-color: #f0f2f6 !important; font-weight: bold; }
-    .stButton button { font-size: 18px !important; height: 52px !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# Google Sheet 設定
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1b7AQGkcqK-kWhy9rYHe8Jm813K9i6UZDygjHPYg4BZ4"
 MONITOR_SHEETS = [
     {"name": "金虎男主頁", "gid": "0"},
@@ -45,23 +42,20 @@ def fetch_signals(sid, short_n, long_n):
 
             data = res.json()['chart']['result'][0]
             quote = data['indicators']['quote'][0]
-            timestamps = data.get('timestamp', [])
 
             raw_cls = [x for x in quote.get('close', []) if x is not None]
             raw_high = [x for x in quote.get('high', []) if x is not None]
             raw_low = [x for x in quote.get('low', []) if x is not None]
             raw_vol = [x for x in quote.get('volume', []) if x is not None]
 
-            dates = [time.strftime('%Y-%m-%d', time.localtime(ts)) for ts in timestamps[:len(raw_cls)]]
-            
             cls = raw_cls[::-1]
             highs = raw_high[::-1]
             lows = raw_low[::-1]
             vols = raw_vol[::-1]
-            dates = dates[::-1]
 
             if len(cls) < 20: continue
 
+            # 富果即時價
             f_res = requests.get(f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}", 
                                headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
             
@@ -122,21 +116,18 @@ def fetch_signals(sid, short_n, long_n):
 
             vol_tag = "🔴量增" if len(vols) >= 2 and vols[0] > vols[1] * 1.25 else ""
 
-            # K線圖資料
-            plot_ma_short = [get_ma([T_close] + cls if is_fugle_active else cls, int(short_n), i) if pd.notna(short_n) else None for i in range(60)]
-            plot_ma_long = [get_ma([T_close] + cls if is_fugle_active else cls, int(long_n), i) if pd.notna(long_n) else None for i in range(60)]
-
+            # K線圖資料 - 使用簡單序號，避免顯示錯誤
             slice_len = min(60, len(cls) + (1 if is_fugle_active else 0))
-            plot_dates = [""] * slice_len   # 不顯示日期
+            dummy_dates = list(range(slice_len))
 
             p_data = {
-                "dates": plot_dates,
+                "dates": dummy_dates,
                 "opens": [0] * slice_len,
-                "highs": highs[:slice_len][::-1] if highs else [0] * slice_len,
-                "lows": lows[:slice_len][::-1] if lows else [0] * slice_len,
+                "highs": highs[:slice_len][::-1] if highs else [T_close] * slice_len,
+                "lows": lows[:slice_len][::-1] if lows else [T_close * 0.95] * slice_len,
                 "closes": ([T_close] + cls)[:slice_len][::-1] if is_fugle_active else cls[:slice_len][::-1],
-                "ma_s": plot_ma_short[:slice_len][::-1],
-                "ma_l": plot_ma_long[:slice_len][::-1]
+                "ma_s": [get_ma([T_close] + cls if is_fugle_active else cls, int(short_n), i) if pd.notna(short_n) else None for i in range(slice_len)],
+                "ma_l": [get_ma([T_close] + cls if is_fugle_active else cls, int(long_n), i) if pd.notna(long_n) else None for i in range(slice_len)]
             }
 
             if has_signal:
@@ -150,6 +141,7 @@ def fetch_signals(sid, short_n, long_n):
             continue
     return None
 
+# run_scan_for_sheet 和 run_all_scans（保持不變）
 def run_scan_for_sheet(sheet_name, gid):
     results = []
     csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}&cb={int(time.time())}"
@@ -200,7 +192,7 @@ def run_all_scans():
         all_results.extend(run_scan_for_sheet(sheet["name"], sheet["gid"]))
     return all_results
 
-# --- 主畫面 ---
+# 主畫面
 st.title("🐯 金虎南：轉折監控系統 (純均線與2日法則版)")
 st.caption("最後更新時間：" + time.strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -240,7 +232,7 @@ if st.session_state["all_data"]:
     
     for item in st.session_state["all_data"]:
         p = item.get("plot_data")
-        if p:
+        if p and len(p["closes"]) > 5:
             with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item.get('名稱','')} — 【{item['訊號']}】", expanded=False):
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(
@@ -265,7 +257,7 @@ if st.session_state["all_data"]:
                     height=450,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
-                fig.update_xaxes(type='category', tickangle=-45, showticklabels=False)  # 不顯示日期
+                fig.update_xaxes(showticklabels=False)   # 不顯示日期
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 else:
     st.info("目前所有監控分頁中皆無觸發訊號。")
