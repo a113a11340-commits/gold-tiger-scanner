@@ -127,7 +127,7 @@ def fetch_signals(sid, short_n, long_n):
             plot_ma_long = [get_ma([T_close] + cls if is_fugle_active else cls, int(long_n), i) if pd.notna(long_n) else None for i in range(60)]
 
             slice_len = min(60, len(cls) + (1 if is_fugle_active else 0))
-            plot_dates = dates[:slice_len][::-1] if dates else list(range(slice_len))[::-1]
+            plot_dates = [""] * slice_len   # 不顯示日期
 
             p_data = {
                 "dates": plot_dates,
@@ -223,13 +223,16 @@ if st.session_state["all_data"]:
     
     df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data"], errors="ignore")
     
-    # 讓「突破」變紅色（表格內）
-    def color_breakthrough(val):
-        if isinstance(val, str) and "突破" in val:
-            return f'<span style="color:red; font-weight:bold;">{val}</span>'
+    # 突破紅色、跌破綠色
+    def color_signal(val):
+        if isinstance(val, str):
+            if "突破" in val:
+                return f'<span style="color:red; font-weight:bold;">{val}</span>'
+            elif "跌破" in val:
+                return f'<span style="color:green; font-weight:bold;">{val}</span>'
         return val
     
-    df_display['訊號'] = df_display['訊號'].apply(color_breakthrough)
+    df_display['訊號'] = df_display['訊號'].apply(color_signal)
     st.html(df_display.to_html(escape=False, index=False))
     
     st.markdown("---")
@@ -241,10 +244,17 @@ if st.session_state["all_data"]:
             with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item.get('名稱','')} — 【{item['訊號']}】", expanded=False):
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(
-                    x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
-                    increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
-                    decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
-                    line_width=1.8, name='K線'
+                    x=p["dates"], 
+                    open=p["opens"], 
+                    high=p["highs"], 
+                    low=p["lows"], 
+                    close=p["closes"],
+                    increasing_line_color='#FF3333', 
+                    increasing_fillcolor='#FF3333',
+                    decreasing_line_color='#00A600', 
+                    decreasing_fillcolor='#00A600',
+                    line_width=1.8, 
+                    name='K線'
                 ))
                 fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=2)))
                 fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=2)))
@@ -255,7 +265,7 @@ if st.session_state["all_data"]:
                     height=450,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
-                fig.update_xaxes(type='category', tickangle=-45)
+                fig.update_xaxes(type='category', tickangle=-45, showticklabels=False)  # 不顯示日期
                 st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 else:
     st.info("目前所有監控分頁中皆無觸發訊號。")
