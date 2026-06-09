@@ -11,11 +11,34 @@ st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
 
+# === 加大字體 + 紅色突破訊號 CSS ===
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
-    table { width: 100% !important; font-size: 18px !important; }
-    th { background-color: #f0f2f6 !important; }
+    
+    /* 整體文字加大（手機友好） */
+    body, p, div, span, h1, h2, h3, h4 {
+        font-size: 1.15rem !important;
+    }
+    
+    table { 
+        width: 100% !important; 
+        font-size: 24px !important; 
+    }
+    th, td {
+        font-size: 24px !important;
+        padding: 12px 8px !important;
+        line-height: 1.4 !important;
+    }
+    th {
+        background-color: #f0f2f6 !important;
+        font-weight: bold;
+    }
+    
+    .stButton button {
+        font-size: 18px !important;
+        height: 52px !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -54,7 +77,6 @@ def fetch_signals(sid, short_n, long_n):
             
             if len(cls) < 20: continue
 
-            # 富果即時價格
             f_res = requests.get(f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}", 
                                headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
             
@@ -100,7 +122,6 @@ def fetch_signals(sid, short_n, long_n):
                 trend = "⬆️" if T_ma > Y_ma else "↘️"
                 label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
 
-                # 2日法則 (與試算表一致)
                 if (B_close < B_ma and Y_close > Y_ma) and (T_low > T_ma) and (T_close > Y_close):
                     signals.append(f"🔥2日法則(強勢突破){label_str}")
                     has_signal = True
@@ -116,11 +137,27 @@ def fetch_signals(sid, short_n, long_n):
 
             vol_tag = "🔴量增" if len(vols) >= 2 and vols[0] > vols[1] * 1.25 else ""
 
+            # K線圖資料
+            plot_ma_short = [get_ma([T_close] + cls if is_fugle_active else cls, int(short_n), i) if pd.notna(short_n) else None for i in range(60)]
+            plot_ma_long = [get_ma([T_close] + cls if is_fugle_active else cls, int(long_n), i) if pd.notna(long_n) else None for i in range(60)]
+
+            slice_len = min(60, len(cls) + (1 if is_fugle_active else 0))
+            p_data = {
+                "dates": list(range(slice_len))[::-1],
+                "opens": [0] * slice_len,
+                "highs": highs[:slice_len][::-1] if highs else [0] * slice_len,
+                "lows": lows[:slice_len][::-1] if lows else [0] * slice_len,
+                "closes": ([T_close] + cls)[:slice_len][::-1] if is_fugle_active else cls[:slice_len][::-1],
+                "ma_s": plot_ma_short[:slice_len][::-1],
+                "ma_l": plot_ma_long[:slice_len][::-1]
+            }
+
             if has_signal:
                 return {
                     "price": T_close,
                     "signal": " + ".join(signals),
-                    "vol": vol_tag
+                    "vol": vol_tag,
+                    "plot_data": p_data
                 }
         except:
             continue
@@ -161,7 +198,8 @@ def run_scan_for_sheet(sheet_name, gid):
                             "名稱": t[3],
                             "現價": f"{data['price']:.2f}", 
                             "訊號": data['signal'], 
-                            "量能": data['vol']
+                            "量能": data['vol'],
+                            "plot_data": data.get("plot_data")
                         })
                 except:
                     pass
@@ -195,8 +233,44 @@ if "all_data" not in st.session_state:
 
 if st.session_state["all_data"]:
     st.subheader(f"📊 綜合監控結果 (共觸發 {len(st.session_state['all_data'])} 檔個股)")
-    df_display = pd.DataFrame(st.session_state["all_data"])
-    cols = ['來源工作表'] + [col for col in df_display.columns if col != '來源工作表']
-    st.table(df_display[cols])   # 完全展開顯示，無滑動條
+    
+    df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data"], errors="ignore")
+    
+    # 讓「突破」顯示紅色
+    def highlight_breakthrough(val):
+        if isinstance(val, str) and "突破" in val:
+            return 'color: red; font-weight: bold;'
+        return ''
+    
+    styled_df = df_display.style.map(highlight_breakthrough, subset=['訊號'])
+    
+    cols = ['來源工作表'] + [col for col in styled_df.columns if col != '來源工作表']
+    st.dataframe(styled_df[cols], use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    st.subheader("📈 觸發個股 K 線軌道圖")
+    
+    for item in st.session_state["all_data"]:
+        p = item.get("plot_data")
+        if p:
+            with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item.get('名稱','')} — 【{item['訊號']}】", expanded=False):
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(
+                    x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
+                    increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
+                    decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
+                    line_width=1.8, name='K線'
+                ))
+                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
+                fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
+                
+                fig.update_layout(
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    height=420,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                )
+                fig.update_xaxes(type='category', tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 else:
     st.info("目前所有監控分頁中皆無觸發訊號。")
