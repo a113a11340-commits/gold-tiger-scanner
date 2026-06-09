@@ -11,15 +11,13 @@ st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
 
-# === 加大字體 + 紅色突破訊號 CSS ===
+# === 加大字體 + 紅色突破樣式 ===
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
     
-    /* 整體文字加大（手機友好） */
-    body, p, div, span, h1, h2, h3, h4 {
-        font-size: 1.15rem !important;
-    }
+    /* 整體文字加大 */
+    body, p, div, span, h1, h2, h3, h4 { font-size: 1.15rem !important; }
     
     table { 
         width: 100% !important; 
@@ -27,18 +25,12 @@ st.markdown("""
     }
     th, td {
         font-size: 24px !important;
-        padding: 12px 8px !important;
-        line-height: 1.4 !important;
+        padding: 14px 8px !important;
+        line-height: 1.45 !important;
     }
-    th {
-        background-color: #f0f2f6 !important;
-        font-weight: bold;
-    }
+    th { background-color: #f0f2f6 !important; font-weight: bold; }
     
-    .stButton button {
-        font-size: 18px !important;
-        height: 52px !important;
-    }
+    .stButton button { font-size: 18px !important; height: 52px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -235,18 +227,8 @@ if st.session_state["all_data"]:
     st.subheader(f"📊 綜合監控結果 (共觸發 {len(st.session_state['all_data'])} 檔個股)")
     
     df_display = pd.DataFrame(st.session_state["all_data"]).drop(columns=["plot_data"], errors="ignore")
-    
-    # 讓「突破」顯示紅色
-    def highlight_breakthrough(val):
-        if isinstance(val, str) and "突破" in val:
-            return 'color: red; font-weight: bold;'
-        return ''
-    
-    styled_df = df_display.style.map(highlight_breakthrough, subset=['訊號'])
-    
-    cols = ['來源工作表'] + [col for col in styled_df.columns if col != '來源工作表']
-    st.dataframe(styled_df[cols], use_container_width=True, hide_index=True)
-    
+    st.table(df_display)   # 使用 st.table 支援紅色樣式
+
     st.markdown("---")
     st.subheader("📈 觸發個股 K 線軌道圖")
     
