@@ -38,7 +38,8 @@ def fetch_signals(sid, short_n, long_n):
     for sfx in suffixes:
         try:
             valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
-            max_n = max(int(max(valid_ns)) + 10 if valid_ns else 30, 60)
+            # 【修正點 1】拉大歷史資料範圍至 120 天，確保計算長天期均線時有足夠後方數據，均線才不會斷掉
+            max_n = max(int(max(valid_ns)) + 60 if valid_ns else 60, 120)
             
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
             res = requests.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0'})
@@ -66,7 +67,8 @@ def fetch_signals(sid, short_n, long_n):
                         t_dates.append(time.strftime('%Y-%m-%d', time.localtime(timestamps[i])))
                     else:
                         t_dates.append("")
-                        
+            
+            # 先保持正序（歷史到最新）來計算訊號
             cls = t_cls[::-1]
             highs = t_highs[::-1]
             lows = t_lows[::-1]
@@ -77,7 +79,7 @@ def fetch_signals(sid, short_n, long_n):
             req_len = int(max(valid_ns)) + 3 if valid_ns else 10
             if len(cls) < req_len: continue
 
-            # --- 獲獲即時價格 (富果 API) ---
+            # --- 獲取即時價格 (富果 API) ---
             f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
             f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
             
@@ -150,6 +152,7 @@ def fetch_signals(sid, short_n, long_n):
                     has_signal = True
                     signal_types.add("MA")
 
+            # 將即時數據合併進去
             if is_fugle_active:
                 cls = [T_close] + cls
                 highs = [T_high] + highs
@@ -162,6 +165,7 @@ def fetch_signals(sid, short_n, long_n):
             if len(vols) >= 2 and vols[0] > vols[1] * 1.25:
                 vol_tag = "🔴量增"
 
+            # 【修正點 2】重新設計均線畫圖陣列：從最新的 K 線往前算 60 根，因為有 120 天歷史當後盾，這 60 根均線絕不會變短或斷掉
             plot_ma_short, plot_ma_long = [], []
             for i in range(60):
                 if i >= len(cls): break
@@ -271,45 +275,37 @@ if st.session_state["all_data"]:
     for item in st.session_state["all_data"]:
         p = item.get("plot_data")
         sig_text = item["訊號"]
-        sig_types = item.get("signal_types", [])
         
         if p:
             with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
                 fig = go.Figure()
                 
-                # 1. 台灣標準 K 線格式優化 (實心紅漲、實心綠跌)
+                # 1. 台灣標準 K 線
                 fig.add_trace(go.Candlestick(
-                    x=p["dates"], 
-                    open=p["opens"], 
-                    high=p["highs"], 
-                    low=p["lows"], 
-                    close=p["closes"],
-                    increasing=dict(line=dict(color='#FF3333', width=1.5), fillcolor='#FF3333'),
-                    decreasing=dict(line=dict(color='#00A600', width=1.5), fillcolor='#00A600'),
-                    name='K線'
+                    x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
+                    increasing_line_color='#FF3333', increasing_fillcolor='#FF3333',
+                    decreasing_line_color='#00A600', decreasing_fillcolor='#00A600',
+                    line_width=1.8, name='K線'
                 ))
                 
-                # 2. 均線繪製 (只保留短/長均線軌道)
-                if "MA" in sig_types:
-                    if any(x is not None for x in p["ma_s"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
-                    if any(x is not None for x in p["ma_l"]):
-                        fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
+                # 2. 均線繪製：不管有沒有觸發均線訊號，只要有設定天期，都強制畫滿 60 根
+                if any(x is not None for x in p["ma_s"]):
+                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_s"], mode='lines', name='短均線', line=dict(color='#FFA500', width=1.8)))
+                if any(x is not None for x in p["ma_l"]):
+                    fig.add_trace(go.Scatter(x=p["dates"], y=p["ma_l"], mode='lines', name='長均線', line=dict(color='#1E90FF', width=1.8)))
                 
-                # 3. 圖表佈局與互動優化
+                # 圖表佈局優化
                 fig.update_layout(
-                    xaxis_rangeslider_visible=False,  # 隱藏下方大範圍拉條以節省視覺空間
-                    margin=dict(l=15, r=15, t=30, b=15),
-                    height=420,
-                    hovermode='x unified', # 滑鼠游標移過去時，同時顯示該 K 線的所有價格數據
+                    xaxis_rangeslider_visible=False,
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    height=380,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 
-                # 徹底去除假日空白與設定 X 軸樣式
-                fig.update_xaxes(type='category', tickangle=-45, nticks=15, gridcolor='#EAEAEA')
-                fig.update_yaxes(gridcolor='#EAEAEA')
+                # 徹底去除假日空白
+                fig.update_xaxes(type='category', tickangle=-45, nticks=15)
                 
-                # 【重要修改】：將 staticPlot 改為 False（或移除），以啟用完整的滑鼠縮放與移動功能
-                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': True})
+                # 保持為原本的靜態網頁圖表（staticPlot: True），無滑鼠點擊互動與縮放
+                st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
 else: 
     st.info("目前所有監控分頁中皆無觸發訊號。")
