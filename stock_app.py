@@ -5,6 +5,7 @@ import io
 import time
 import concurrent.futures
 import plotly.graph_objects as go
+from datetime import date
 
 # --- 1. 網頁基本設定 ---
 st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
@@ -37,17 +38,22 @@ def get_ma(arr, period, offset=0):
     sub = arr[offset:offset + period]
     return sum(sub) / period if len(sub) == period else None
 
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_signals(sid, short_n, long_n):
+
+# ===== 加強版 Yahoo 歷史資料快取（同一天只抓一次）=====
+@st.cache_data(ttl=86400, show_spinner=False)  # 快取 24 小時
+def get_yahoo_history(sid: str, max_n: int, cache_date: str):
+    """
+    抓取 Yahoo 歷史日線資料，並用日期當 cache key。
+    同一天內多次執行會直接使用快取，不會再向 Yahoo 發請求。
+    """
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
         try:
-            valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
-            max_n = max(int(max(valid_ns)) + 60 if valid_ns else 60, 120)
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
             res = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
             if res.status_code != 200:
                 continue
+
             data = res.json()["chart"]["result"][0]
             quote = data["indicators"]["quote"][0]
             timestamps = data.get("timestamp", [])
@@ -56,6 +62,7 @@ def fetch_signals(sid, short_n, long_n):
             raw_low = quote.get("low", [])
             raw_op = quote.get("open", [])
             raw_vol = quote.get("volume", [])
+
             t_cls, t_highs, t_lows, t_opens, t_vols, t_dates = [], [], [], [], [], []
             for i in range(len(raw_cls)):
                 if raw_cls[i] is not None and raw_high[i] is not None and raw_low[i] is not None:
@@ -68,139 +75,181 @@ def fetch_signals(sid, short_n, long_n):
                         t_dates.append(time.strftime("%Y-%m-%d", time.localtime(timestamps[i])))
                     else:
                         t_dates.append("")
+
             # 最新在前面
-            cls = t_cls[::-1]
-            highs = t_highs[::-1]
-            lows = t_lows[::-1]
-            opens = t_opens[::-1]
-            vols = t_vols[::-1]
-            dates = t_dates[::-1]
-            req_len = int(max(valid_ns)) + 30 if valid_ns else 40
-            if len(cls) < req_len:
-                continue
-            # --- 獲取即時價格 (富果 API) ---
-            f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
-            f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
-            is_fugle_active = False
-            T_close = T_open = T_low = T_high = T_vol = None
-            Y_close = Y_high = Y_low = Y_vol = None
-            B_close = None
-            if f_res.status_code == 200:
-                f_data = f_res.json().get("data", {}).get("quote", {})
-                cur_price = f_data.get("price", 0)
-                if cur_price and cur_price > 0:
-                    is_fugle_active = True
-                    T_close = cur_price
-                    T_open = f_data.get("open", cur_price) if f_data.get("open", 0) > 0 else cur_price
-                    T_low = f_data.get("low", cur_price) if f_data.get("low", 0) > 0 else cur_price
-                    T_high = f_data.get("high", cur_price) if f_data.get("high", 0) > 0 else cur_price
-                    T_vol = f_data.get("total", {}).get("tradeVolume", 0) or vols[0]
-                    Y_close, Y_high, Y_low, Y_vol = cls[0], highs[0], lows[0], vols[0]
-                    B_close = cls[1]
-            if not is_fugle_active:
-                T_close = cls[0]
-                T_open = opens[0]
-                T_low = lows[0]
-                T_high = highs[0]
-                T_vol = vols[0]
-                Y_close, Y_high, Y_low, Y_vol = cls[1], highs[1], lows[1], vols[1]
-                B_close = cls[2]
-            is_gap_up = T_open > Y_high
-            is_gap_down = T_open < Y_low
-            signals = []
-            has_signal = False
-            ma_list = [("短", short_n), ("長", long_n)]
-            hist_closes = cls if is_fugle_active else cls[1:]
-            hist_highs = highs if is_fugle_active else highs[1:]
-            hist_lows = lows if is_fugle_active else lows[1:]
-            for label, n in ma_list:
-                if pd.isna(n):
-                    continue
-                n = int(n)
-                if len(cls) < n + 30:
-                    continue
-                if is_fugle_active:
-                    T_ma = get_ma([T_close] + cls, n, 0)
-                    Y_ma = get_ma(hist_closes, n, 0)
-                    B_ma = get_ma(hist_closes, n, 1)
-                else:
-                    T_ma = get_ma(cls, n, 0)
-                    Y_ma = get_ma(hist_closes, n, 0)
-                    B_ma = get_ma(hist_closes, n, 1)
-                if T_ma is None or Y_ma is None or B_ma is None:
-                    continue
-                trend = "⬆️" if T_ma > Y_ma else "↘️"
-                label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
-                # ===== 簡單突破均線 =====
-                if Y_close <= Y_ma and T_close > T_ma:
-                    gap_note = "跳空" if is_gap_up else ""
-                    signals.append(f"🔥{gap_note}突破均線{label_str}")
-                    has_signal = True
-                # ===== 簡單跌破均線 =====
-                if Y_close >= Y_ma and T_close < T_ma:
-                    gap_note = "跳空" if is_gap_down else ""
-                    signals.append(f"📉{gap_note}跌破均線{label_str}")
-                    has_signal = True
-                # ===== 2日法則 =====
-                is_yesterday_breakout = (B_close < B_ma and Y_close > Y_ma)
-                is_today_away = (T_low > T_ma)
-                is_higher_than_yesterday = (T_close > Y_close)
-                if is_yesterday_breakout and is_today_away and is_higher_than_yesterday:
-                    gap_note = "跳空" if is_gap_up else ""
-                    signals.append(f"🔥{gap_note}2日法則(強勢突破){label_str}")
-                    has_signal = True
-                # ===== 反2日法則 =====
-                y_break = (Y_close < Y_ma and B_close >= B_ma)
-                if y_break and T_close > T_ma:
-                    gap_note = "跳空" if is_gap_up else ""
-                    if (T_close - T_ma) / T_ma > 0.005:
-                        signals.append(f"🔄{gap_note}反2日(假跌破){label_str}[強勢反轉]")
-                    else:
-                        signals.append(f"🔄{gap_note}反2日(假跌破){label_str}")
-                    has_signal = True
-            # ===== 量能標籤 =====
-            vol_tag = ""
-            if T_vol > Y_vol * 1.5:
-                vol_tag = "🔴爆量"
-            elif T_vol > Y_vol * 1.2:
-                vol_tag = "🔴量增"
-            elif T_vol > Y_vol:
-                vol_tag = "量增"
-            # 合併即時資料給圖表用
-            if is_fugle_active:
-                cls = [T_close] + cls
-                highs = [T_high] + highs
-                lows = [T_low] + lows
-                opens = [T_open] + opens
-                dates = [time.strftime("%Y-%m-%d")] + dates
-                vols = [T_vol] + vols
-            # 畫圖資料（最近 60 根）
-            plot_ma_short, plot_ma_long = [], []
-            for i in range(60):
-                if i >= len(cls):
-                    break
-                plot_ma_short.append(get_ma(cls, int(short_n), i) if pd.notna(short_n) else None)
-                plot_ma_long.append(get_ma(cls, int(long_n), i) if pd.notna(long_n) else None)
-            slice_len = min(60, len(cls))
-            p_data = {
-                "dates": dates[:slice_len][::-1],
-                "opens": opens[:slice_len][::-1],
-                "highs": highs[:slice_len][::-1],
-                "lows": lows[:slice_len][::-1],
-                "closes": cls[:slice_len][::-1],
-                "ma_s": plot_ma_short[:slice_len][::-1],
-                "ma_l": plot_ma_long[:slice_len][::-1]
+            return {
+                "cls": t_cls[::-1],
+                "highs": t_highs[::-1],
+                "lows": t_lows[::-1],
+                "opens": t_opens[::-1],
+                "vols": t_vols[::-1],
+                "dates": t_dates[::-1]
             }
-            if has_signal:
-                return {
-                    "price": T_close,
-                    "signal": " + ".join(signals),
-                    "vol": vol_tag,
-                    "plot_data": p_data
-                }
         except Exception:
             continue
     return None
+
+
+def fetch_signals(sid, short_n, long_n):
+    try:
+        valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
+        max_n = max(int(max(valid_ns)) + 60 if valid_ns else 60, 120)
+
+        # ===== 使用日期快取的 Yahoo 歷史資料 =====
+        today_str = date.today().isoformat()
+        hist = get_yahoo_history(sid, max_n, today_str)
+
+        if hist is None:
+            return None
+
+        cls = hist["cls"]
+        highs = hist["highs"]
+        lows = hist["lows"]
+        opens = hist["opens"]
+        vols = hist["vols"]
+        dates = hist["dates"]
+
+        req_len = int(max(valid_ns)) + 30 if valid_ns else 40
+        if len(cls) < req_len:
+            return None
+
+        # --- 獲取即時價格 (富果 API) ---
+        f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
+        f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
+        is_fugle_active = False
+        T_close = T_open = T_low = T_high = T_vol = None
+        Y_close = Y_high = Y_low = Y_vol = None
+        B_close = None
+
+        if f_res.status_code == 200:
+            f_data = f_res.json().get("data", {}).get("quote", {})
+            cur_price = f_data.get("price", 0)
+            if cur_price and cur_price > 0:
+                is_fugle_active = True
+                T_close = cur_price
+                T_open = f_data.get("open", cur_price) if f_data.get("open", 0) > 0 else cur_price
+                T_low = f_data.get("low", cur_price) if f_data.get("low", 0) > 0 else cur_price
+                T_high = f_data.get("high", cur_price) if f_data.get("high", 0) > 0 else cur_price
+                T_vol = f_data.get("total", {}).get("tradeVolume", 0) or vols[0]
+                Y_close, Y_high, Y_low, Y_vol = cls[0], highs[0], lows[0], vols[0]
+                B_close = cls[1]
+
+        if not is_fugle_active:
+            T_close = cls[0]
+            T_open = opens[0]
+            T_low = lows[0]
+            T_high = highs[0]
+            T_vol = vols[0]
+            Y_close, Y_high, Y_low, Y_vol = cls[1], highs[1], lows[1], vols[1]
+            B_close = cls[2]
+
+        is_gap_up = T_open > Y_high
+        is_gap_down = T_open < Y_low
+        signals = []
+        has_signal = False
+        ma_list = [("短", short_n), ("長", long_n)]
+        hist_closes = cls if is_fugle_active else cls[1:]
+        hist_highs = highs if is_fugle_active else highs[1:]
+        hist_lows = lows if is_fugle_active else lows[1:]
+
+        for label, n in ma_list:
+            if pd.isna(n):
+                continue
+            n = int(n)
+            if len(cls) < n + 30:
+                continue
+            if is_fugle_active:
+                T_ma = get_ma([T_close] + cls, n, 0)
+                Y_ma = get_ma(hist_closes, n, 0)
+                B_ma = get_ma(hist_closes, n, 1)
+            else:
+                T_ma = get_ma(cls, n, 0)
+                Y_ma = get_ma(hist_closes, n, 0)
+                B_ma = get_ma(hist_closes, n, 1)
+            if T_ma is None or Y_ma is None or B_ma is None:
+                continue
+            trend = "⬆️" if T_ma > Y_ma else "↘️"
+            label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
+
+            # ===== 簡單突破均線 =====
+            if Y_close <= Y_ma and T_close > T_ma:
+                gap_note = "跳空" if is_gap_up else ""
+                signals.append(f"🔥{gap_note}突破均線{label_str}")
+                has_signal = True
+
+            # ===== 簡單跌破均線 =====
+            if Y_close >= Y_ma and T_close < T_ma:
+                gap_note = "跳空" if is_gap_down else ""
+                signals.append(f"📉{gap_note}跌破均線{label_str}")
+                has_signal = True
+
+            # ===== 2日法則 =====
+            is_yesterday_breakout = (B_close < B_ma and Y_close > Y_ma)
+            is_today_away = (T_low > T_ma)
+            is_higher_than_yesterday = (T_close > Y_close)
+            if is_yesterday_breakout and is_today_away and is_higher_than_yesterday:
+                gap_note = "跳空" if is_gap_up else ""
+                signals.append(f"🔥{gap_note}2日法則(強勢突破){label_str}")
+                has_signal = True
+
+            # ===== 反2日法則 =====
+            y_break = (Y_close < Y_ma and B_close >= B_ma)
+            if y_break and T_close > T_ma:
+                gap_note = "跳空" if is_gap_up else ""
+                if (T_close - T_ma) / T_ma > 0.005:
+                    signals.append(f"🔄{gap_note}反2日(假跌破){label_str}[強勢反轉]")
+                else:
+                    signals.append(f"🔄{gap_note}反2日(假跌破){label_str}")
+                has_signal = True
+
+        # ===== 量能標籤 =====
+        vol_tag = ""
+        if T_vol > Y_vol * 1.5:
+            vol_tag = "🔴爆量"
+        elif T_vol > Y_vol * 1.2:
+            vol_tag = "🔴量增"
+        elif T_vol > Y_vol:
+            vol_tag = "量增"
+
+        # 合併即時資料給圖表用
+        if is_fugle_active:
+            cls = [T_close] + cls
+            highs = [T_high] + highs
+            lows = [T_low] + lows
+            opens = [T_open] + opens
+            dates = [time.strftime("%Y-%m-%d")] + dates
+            vols = [T_vol] + vols
+
+        # 畫圖資料（最近 60 根）
+        plot_ma_short, plot_ma_long = [], []
+        for i in range(60):
+            if i >= len(cls):
+                break
+            plot_ma_short.append(get_ma(cls, int(short_n), i) if pd.notna(short_n) else None)
+            plot_ma_long.append(get_ma(cls, int(long_n), i) if pd.notna(long_n) else None)
+
+        slice_len = min(60, len(cls))
+        p_data = {
+            "dates": dates[:slice_len][::-1],
+            "opens": opens[:slice_len][::-1],
+            "highs": highs[:slice_len][::-1],
+            "lows": lows[:slice_len][::-1],
+            "closes": cls[:slice_len][::-1],
+            "ma_s": plot_ma_short[:slice_len][::-1],
+            "ma_l": plot_ma_long[:slice_len][::-1]
+        }
+
+        if has_signal:
+            return {
+                "price": T_close,
+                "signal": " + ".join(signals),
+                "vol": vol_tag,
+                "plot_data": p_data
+            }
+    except Exception:
+        return None
+    return None
+
 
 def run_scan_for_sheet(sheet_name, gid):
     results = []
@@ -223,6 +272,7 @@ def run_scan_for_sheet(sheet_name, gid):
             ln_raw = pd.to_numeric(row.iloc[3], errors="coerce")
             name = row.iloc[1]
             tasks.append((sid, sn_raw, ln_raw, name))
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_stock = {
                 executor.submit(fetch_signals, t[0], t[1], t[2]): t
@@ -251,16 +301,18 @@ def run_scan_for_sheet(sheet_name, gid):
         st.error(f"讀取分頁【{sheet_name}】失敗: {e}")
     return results
 
+
 def run_all_scans():
     all_results = []
     for sheet in MONITOR_SHEETS:
         all_results.extend(run_scan_for_sheet(sheet["name"], sheet["gid"]))
     return all_results
 
+
 # ===== 主畫面 =====
 st.title("🐯 金虎南：轉折監控系統（純均線 + 2日法則）")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"最後更新時間：{update_time}｜主頁 + 4 個分頁連動｜已移除小箱型")
+st.caption(f"最後更新時間：{update_time}｜主頁 + 4 個分頁連動｜Yahoo 歷史資料已啟用每日快取")
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -269,7 +321,7 @@ with col1:
         st.rerun()
 with col2:
     if st.button("🚀 強制刷新即時報價", type="primary", use_container_width=True):
-        fetch_signals.clear()
+        get_yahoo_history.clear()  # 清除 Yahoo 歷史快取
         st.session_state["all_data"] = run_all_scans()
         st.rerun()
 
