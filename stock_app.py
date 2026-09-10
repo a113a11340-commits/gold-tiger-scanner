@@ -7,7 +7,7 @@ import concurrent.futures
 import plotly.graph_objects as go
 
 # --- 1. 網頁基本設定 ---
-st.set_page_config(layout="wide", page_title="金虎南-純均線監控（含小箱型）")
+st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 
 # --- 富果 API 設定 ---
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
@@ -36,68 +36,6 @@ def get_ma(arr, period, offset=0):
         return None
     sub = arr[offset:offset + period]
     return sum(sub) / period if len(sub) == period else None
-
-# ===== 小箱型／均線糾結偵測（移植自試算表）=====
-def check_small_box(closes, highs, lows, ma_period, lookback=6):
-    if len(closes) < ma_period + lookback:
-        return {"is_small_box": False, "days": 0, "note": "", "box_top": 0, "box_bottom": 0}
-
-    entangled_days = 0
-    max_distance = 0
-    box_high = float("-inf")
-    box_low = float("inf")
-
-    for d in range(lookback):
-        ma = get_ma(closes, ma_period, d)
-        if ma is None or ma <= 0:
-            continue
-
-        c = closes[d]
-        h = highs[d]
-        l = lows[d]
-
-        straddling = (h > ma and l < ma)
-        near_ma = abs(c - ma) / ma <= 0.01
-
-        if straddling or near_ma:
-            entangled_days += 1
-            if h > box_high:
-                box_high = h
-            if l < box_low:
-                box_low = l
-
-        dist = abs(c - ma) / ma
-        if dist > max_distance:
-            max_distance = dist
-
-    if max_distance > 0.025:
-        return {"is_small_box": False, "days": entangled_days, "note": "", "box_top": 0, "box_bottom": 0}
-
-    if entangled_days >= 4 and box_high > 0 and box_low < float("inf") and box_high > box_low:
-        top = round(box_high, 2)
-        bottom = round(box_low, 2)
-        amplitude = round((top - bottom) / bottom * 100, 1)
-        return {
-            "is_small_box": True,
-            "days": entangled_days,
-            "note": f"📦小箱型({entangled_days}天) 頂{top} 底{bottom} 振幅{amplitude}%",
-            "box_top": top,
-            "box_bottom": bottom
-        }
-
-    if entangled_days >= 3 and box_high > 0 and box_low < float("inf") and box_high > box_low:
-        top = round(box_high, 2)
-        bottom = round(box_low, 2)
-        amplitude = round((top - bottom) / bottom * 100, 1)
-        return {
-            "is_small_box": False,
-            "days": entangled_days,
-            "note": f"⚠️均線糾結警戒({entangled_days}天) 頂{top} 底{bottom} 振幅{amplitude}%",
-            "box_top": top,
-            "box_bottom": bottom
-        }
-
-    return {"is_small_box": False, "days": entangled_days, "note": "", "box_top": 0, "box_bottom": 0}
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_signals(sid, short_n, long_n):
@@ -135,7 +73,7 @@ def fetch_signals(sid, short_n, long_n):
                     else:
                         t_dates.append("")
 
-            # 最新在前面（與試算表一致）
+            # 最新在前面
             cls = t_cls[::-1]
             highs = t_highs[::-1]
             lows = t_lows[::-1]
@@ -211,41 +149,6 @@ def fetch_signals(sid, short_n, long_n):
                 trend = "⬆️" if T_ma > Y_ma else "↘️"
                 label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
 
-                # ===== 小箱型偵測（使用歷史資料，排除今天）=====
-                hist_closes_for_box = cls if is_fugle_active else cls[1:]
-                hist_highs_for_box = highs if is_fugle_active else highs[1:]
-                hist_lows_for_box = lows if is_fugle_active else lows[1:]
-
-                box_check = check_small_box(
-                    hist_closes_for_box,
-                    hist_highs_for_box,
-                    hist_lows_for_box,
-                    n,
-                    6
-                )
-
-                if box_check["note"]:
-                    signals.append(box_check["note"] + " " + label_str)
-                    has_signal = True
-
-                # ===== 突破小箱型（收盤突破箱頂 + 量增）=====
-                if (box_check["box_top"] > 0 and
-                    Y_close <= box_check["box_top"] and
-                    T_close > box_check["box_top"] and
-                    T_vol > Y_vol):
-                    gap_note = "跳空" if is_gap_up else ""
-                    signals.append(f"🔥{gap_note}突破小箱型 頂{box_check['box_top']}{label_str}")
-                    has_signal = True
-
-                # ===== 跌破小箱型（收盤跌破箱底 + 量增）=====
-                if (box_check["box_bottom"] > 0 and
-                    Y_close >= box_check["box_bottom"] and
-                    T_close < box_check["box_bottom"] and
-                    T_vol > Y_vol):
-                    gap_note = "跳空" if is_gap_down else ""
-                    signals.append(f"📉{gap_note}跌破小箱型 底{box_check['box_bottom']}{label_str}")
-                    has_signal = True
-
                 # ===== 簡單突破均線 =====
                 if Y_close <= Y_ma and T_close > T_ma:
                     gap_note = "跳空" if is_gap_up else ""
@@ -278,7 +181,7 @@ def fetch_signals(sid, short_n, long_n):
                         signals.append(f"🔄{gap_note}反2日(假跌破){label_str}")
                     has_signal = True
 
-            # ===== 量能標籤（對齊試算表）=====
+            # ===== 量能標籤 =====
             vol_tag = ""
             if T_vol > Y_vol * 1.5:
                 vol_tag = "🔴爆量"
@@ -386,9 +289,9 @@ def run_all_scans():
     return all_results
 
 # ===== 主畫面 =====
-st.title("🐯 金虎南：轉折監控系統（純均線 + 2日法則 + 小箱型）")
+st.title("🐯 金虎南：轉折監控系統（純均線 + 2日法則）")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
-st.caption(f"最後更新時間：{update_time}｜主頁 + 4 個分頁連動｜已包含小箱型突破/跌破邏輯")
+st.caption(f"最後更新時間：{update_time}｜主頁 + 4 個分頁連動｜已移除小箱型")
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -404,16 +307,20 @@ with col2:
 if "all_data" not in st.session_state:
     st.session_state["all_data"] = run_all_scans()
 
-# ===== 過濾規則（對齊試算表）=====
-# 1. 有「2日法則」或「反2日」→ 無條件顯示
-# 2. 其他訊號 → 必須有量能標籤才顯示
+# ===== 過濾規則 =====
+# 1. 有「2日法則」或「反2日」→ 一定顯示
+# 2. 有「跌破」→ 一定顯示（不需量能）
+# 3. 其他訊號（突破等）→ 必須有量能才顯示
 filtered_data = []
 for item in st.session_state["all_data"]:
     sig = str(item.get("訊號", ""))
     vol = str(item.get("量能", ""))
+    
     is_two_day = "2日法則" in sig or "反2日" in sig
+    is_breakdown = "跌破" in sig
     has_volume = vol in ["量增", "🔴量增", "🔴爆量"]
-    if is_two_day or has_volume:
+    
+    if is_two_day or is_breakdown or has_volume:
         filtered_data.append(item)
 
 if filtered_data:
@@ -461,4 +368,4 @@ if filtered_data:
 
                 st.plotly_chart(fig, use_container_width=True, config={"staticPlot": True})
 else:
-    st.info("目前所有監控分頁中皆無符合條件的訊號（已套用量能過濾規則）。")
+    st.info("目前所有監控分頁中皆無符合條件的訊號。")
