@@ -321,7 +321,8 @@ with col1:
         st.rerun()
 with col2:
     if st.button("🚀 強制刷新即時報價", type="primary", use_container_width=True):
-        get_yahoo_history.clear()  # 清除 Yahoo 歷史快取
+        # 只重新跑掃描，Yahoo 歷史資料繼續使用今天的快取
+        # 富果即時報價會重新抓取
         st.session_state["all_data"] = run_all_scans()
         st.rerun()
 
