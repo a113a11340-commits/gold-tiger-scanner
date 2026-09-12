@@ -258,7 +258,7 @@ def run_scan_for_sheet(sheet_name, gid):
             ln_raw = pd.to_numeric(row.iloc[3], errors="coerce")
             name = row.iloc[1]
             tasks.append((sid, sn_raw, ln_raw, name))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=45) as executor:
             future_to_stock = {
                 executor.submit(fetch_signals, t[0], t[1], t[2]): t
                 for t in tasks
