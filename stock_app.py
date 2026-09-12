@@ -31,7 +31,7 @@ MONITOR_SHEETS = [
     {"name": "分頁4", "gid": "353487646"},
 ]
 
-# 計算均線工具函數
+# 計算均線工具函數（完全對齊 GAS 的 getMA 邏輯）
 def get_ma(arr, period, offset=0):
     if period <= 0 or len(arr) < offset + period:
         return None
@@ -41,11 +41,6 @@ def get_ma(arr, period, offset=0):
 # ===== 加強版 Yahoo 歷史資料快取（同一天只抓一次）=====
 @st.cache_data(ttl=86400, show_spinner=False)  # 快取 24 小時
 def get_yahoo_history(sid: str, max_n: int, cache_date: str):
-    """
-    抓取 Yahoo 歷史日線資料，並用日期當 cache key。
-    同一天內多次執行會直接使用快取，不會再向 Yahoo 發請求。
-    先試 .TW，失敗再試 .TWO（穩定優先）
-    """
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
         try:
@@ -75,7 +70,7 @@ def get_yahoo_history(sid: str, max_n: int, cache_date: str):
                     else:
                         t_dates.append("")
 
-            # 最新在前面
+            # 反轉成「最新在前面」（index 0 = 最新一天），完全對齊 GAS 邏輯
             return {
                 "cls": t_cls[::-1],
                 "highs": t_highs[::-1],
@@ -93,24 +88,21 @@ def fetch_signals(sid, short_n, long_n):
         valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
         max_n = max(int(max(valid_ns)) + 60 if valid_ns else 60, 120)
 
-        # ===== 使用日期快取的 Yahoo 歷史資料 =====
         today_str = date.today().isoformat()
         hist = get_yahoo_history(sid, max_n, today_str)
         if hist is None:
             return None
 
-        cls = hist["cls"][:]
-        highs = hist["highs"][:]
-        lows = hist["lows"][:]
-        opens = hist["opens"][:]
-        vols = hist["vols"][:]
+        valid_closes = hist["cls"][:]
+        valid_highs = hist["highs"][:]
+        valid_lows = hist["lows"][:]
+        valid_opens = hist["opens"][:]
+        valid_vols = hist["vols"][:]
         dates = hist["dates"][:]
 
-        # 判斷 Yahoo 最新一根是否已經是今天
-        yahoo_has_today = bool(dates) and dates[0] == today_str
-
-        req_len = int(max(valid_ns)) + 30 if valid_ns else 40
-        if len(cls) < req_len:
+        max_period = int(max(valid_ns)) if valid_ns else 0
+        req_len = max_period + 30 if max_period > 0 else 40
+        if len(valid_closes) < req_len:
             return None
 
         # --- 獲取即時價格 (富果 API) ---
@@ -118,68 +110,53 @@ def fetch_signals(sid, short_n, long_n):
         f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
 
         is_fugle_active = False
-        T_close = T_open = T_low = T_high = T_vol = None
-        Y_close = Y_high = Y_low = Y_vol = None
-        B_close = None
-
+        f_data = {}
         if f_res.status_code == 200:
-            f_data = f_res.json().get("data", {}).get("quote", {})
-            cur_price = f_data.get("price", 0) or f_data.get("lastPrice", 0)
+            q = f_res.json().get("data", {}).get("quote", {})
+            cur_price = q.get("price", 0) or q.get("lastPrice", 0)
             if cur_price and cur_price > 0:
                 is_fugle_active = True
-                T_close = cur_price
-                T_open = f_data.get("open", cur_price) if f_data.get("open", 0) > 0 else cur_price
-                T_low = f_data.get("low", cur_price) if f_data.get("low", 0) > 0 else cur_price
-                T_high = f_data.get("high", cur_price) if f_data.get("high", 0) > 0 else cur_price
-                T_vol = f_data.get("total", {}).get("tradeVolume", 0) or (vols[0] if vols else 0)
+                f_data = {
+                    "price": cur_price,
+                    "open": q.get("open", cur_price) if q.get("open", 0) > 0 else cur_price,
+                    "low": q.get("low", cur_price) if q.get("low", 0) > 0 else cur_price,
+                    "high": q.get("high", cur_price) if q.get("high", 0) > 0 else cur_price,
+                    "volume": q.get("total", {}).get("tradeVolume", 0) or (valid_vols[0] if valid_vols else 0)
+                }
+
+        # 完全對齊 GAS 的變數指定與歷史資料切割方式
+        histCloses = valid_closes if not is_fugle_active else valid_closes.slice(1) if hasattr(valid_closes, 'slice') else valid_closes[1:]
+        histHighs = valid_highs if not is_fugle_active else valid_highs[1:]
+        histLows = valid_lows if not is_fugle_active else valid_lows[1:]
 
         if is_fugle_active:
-            if yahoo_has_today:
-                # Yahoo 已經有今天 → 覆蓋最新一根，避免重複
-                cls[0] = T_close
-                highs[0] = T_high
-                lows[0] = T_low
-                opens[0] = T_open
-                vols[0] = T_vol
-                # dates[0] 已經是今天，不用改
-
-                Y_close = cls[1] if len(cls) > 1 else None
-                Y_high = highs[1] if len(highs) > 1 else None
-                Y_low = lows[1] if len(lows) > 1 else None
-                Y_vol = vols[1] if len(vols) > 1 else None
-                B_close = cls[2] if len(cls) > 2 else None
-            else:
-                # Yahoo 還沒有今天 → 新增一根到最前面
-                Y_close = cls[0]
-                Y_high = highs[0]
-                Y_low = lows[0]
-                Y_vol = vols[0]
-                B_close = cls[1] if len(cls) > 1 else None
-
-                cls = [T_close] + cls
-                highs = [T_high] + highs
-                lows = [T_low] + lows
-                opens = [T_open] + opens
-                vols = [T_vol] + vols
-                dates = [today_str] + dates
+            T_close = f_data["price"]
+            T_open  = f_data["open"]
+            T_low   = f_data["low"]
+            T_high  = f_data["high"]
+            T_vol   = f_data["volume"]
+            Y_close = valid_closes[0]
+            Y_high  = valid_highs[0]
+            Y_low   = valid_lows[0]
+            Y_vol   = valid_vols[0]
+            B_close = valid_closes[1] if len(valid_closes) > 1 else None
         else:
-            # 沒有富果即時價，完全用 Yahoo
-            T_close = cls[0]
-            T_open = opens[0]
-            T_low = lows[0]
-            T_high = highs[0]
-            T_vol = vols[0]
-            Y_close = cls[1] if len(cls) > 1 else None
-            Y_high = highs[1] if len(highs) > 1 else None
-            Y_low = lows[1] if len(lows) > 1 else None
-            Y_vol = vols[1] if len(vols) > 1 else None
-            B_close = cls[2] if len(cls) > 2 else None
+            T_close = valid_closes[0]
+            T_open  = valid_opens[0]
+            T_low   = valid_lows[0]
+            T_high  = valid_highs[0]
+            T_vol   = valid_vols[0]
+            Y_close = valid_closes[1] if len(valid_closes) > 1 else None
+            Y_high  = valid_highs[1] if len(highs) > 1 else None
+            Y_low   = valid_lows[1] if len(highs) > 1 else None
+            Y_vol   = valid_vols[1] if len(vols) > 1 else None
+            B_close = valid_closes[2] if len(valid_closes) > 2 else None
 
         if Y_close is None or B_close is None:
             return None
 
-        is_gap_up = T_open > Y_high if Y_high is not None else False
-        is_gap_down = T_open < Y_low if Y_low is not None else False
+        is_gap_up   = T_open > Y_high if Y_high is not None else False
+        is_gap_down = T_open < Y_low  if Y_low  is not None else False
 
         signals = []
         has_signal = False
@@ -189,12 +166,13 @@ def fetch_signals(sid, short_n, long_n):
             if pd.isna(n):
                 continue
             n = int(n)
-            if len(cls) < n + 30:
+            if n <= 0 or len(valid_closes) < n + 30:
                 continue
 
-            T_ma = get_ma(cls, n, 0)
-            Y_ma = get_ma(cls, n, 1)
-            B_ma = get_ma(cls, n, 2)
+            # 完全對齊 GAS 的均線計算：T_ma 用含當日即時價的陣列，Y_ma / B_ma 用歷史資料
+            T_ma = get_ma([T_close] + valid_closes, n, 0) if is_fugle_active else get_ma(valid_closes, n, 0)
+            Y_ma = get_ma(histCloses, n, 0)
+            B_ma = get_ma(histCloses, n, 1)
 
             if T_ma is None or Y_ma is None or B_ma is None:
                 continue
@@ -242,21 +220,27 @@ def fetch_signals(sid, short_n, long_n):
         elif Y_vol and T_vol > Y_vol:
             vol_tag = "量增"
 
-        # 畫圖資料（最近 60 根）
+        # 畫圖資料準備（組合成前端 K 線圖所需格式）
+        plot_cls = [T_close] + valid_closes if is_fugle_active and not (dates and dates[0] == today_str) else valid_closes[:]
+        plot_highs = [T_high] + valid_highs if is_fugle_active and not (dates and dates[0] == today_str) else valid_highs[:]
+        plot_lows = [T_low] + valid_lows if is_fugle_active and not (dates and dates[0] == today_str) else valid_lows[:]
+        plot_opens = [T_open] + valid_opens if is_fugle_active and not (dates and dates[0] == today_str) else valid_opens[:]
+        plot_dates = [today_str] + dates if is_fugle_active and not (dates and dates[0] == today_str) else dates[:]
+
         plot_ma_short, plot_ma_long = [], []
         for i in range(60):
-            if i >= len(cls):
+            if i >= len(plot_cls):
                 break
-            plot_ma_short.append(get_ma(cls, int(short_n), i) if pd.notna(short_n) else None)
-            plot_ma_long.append(get_ma(cls, int(long_n), i) if pd.notna(long_n) else None)
+            plot_ma_short.append(get_ma(plot_cls, int(short_n), i) if pd.notna(short_n) else None)
+            plot_ma_long.append(get_ma(plot_cls, int(long_n), i) if pd.notna(long_n) else None)
 
-        slice_len = min(60, len(cls))
+        slice_len = min(60, len(plot_cls))
         p_data = {
-            "dates": dates[:slice_len][::-1],
-            "opens": opens[:slice_len][::-1],
-            "highs": highs[:slice_len][::-1],
-            "lows": lows[:slice_len][::-1],
-            "closes": cls[:slice_len][::-1],
+            "dates": plot_dates[:slice_len][::-1],
+            "opens": plot_opens[:slice_len][::-1],
+            "highs": plot_highs[:slice_len][::-1],
+            "lows": plot_lows[:slice_len][::-1],
+            "closes": plot_cls[:slice_len][::-1],
             "ma_s": plot_ma_short[:slice_len][::-1],
             "ma_l": plot_ma_long[:slice_len][::-1]
         }
@@ -407,7 +391,6 @@ if filtered_data:
                 )
                 fig.update_xaxes(type="category", tickangle=-45, nticks=15)
 
-                # 關鍵：給每個圖表唯一的 key，避免 StreamlitDuplicateElementId
                 st.plotly_chart(
                     fig,
                     use_container_width=True,
