@@ -13,6 +13,7 @@ st.set_page_config(layout="wide", page_title="金虎南-純均線監控")
 # --- 富果 API 設定 ---
 FUGLE_KEY = "Mzk5YWVkYmMtYzVhNi00OWRhLWI5NWUtNGNjYzI3NjNjZDYyIDg0NDdhYjVmLThlMTktNDE3MC1hZDZmLThkMDcwNThiYzM1Mw=="
 
+# --- 網頁樣式調整 ---
 st.markdown("""
     <style>
     .block-container { padding-top: 2rem; padding-bottom: 0rem; }
@@ -21,7 +22,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- Google Sheet 多分頁設定（新試算表） ---
+# --- Google Sheet 多分頁設定 ---
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1OGsbVKW-h8xwWq_9EO-W172WvdPbfDwjTx533WKaaX4"
 MONITOR_SHEETS = [
     {"name": "主頁", "gid": "0"},
@@ -31,20 +32,25 @@ MONITOR_SHEETS = [
     {"name": "分頁4", "gid": "353487646"},
 ]
 
-# 計算均線工具函數
+# --- 工具函數：計算移動平均線 (MA) ---
 def get_ma(arr, period, offset=0):
+    """
+    計算指定週期的移動平均線
+    arr: 價格陣列
+    period: 均線週期 (例如 5, 20)
+    offset: 位移格數 (0代表當前，1代表上一根)
+    """
     if period <= 0 or len(arr) < offset + period:
         return None
     sub = arr[offset:offset + period]
     return sum(sub) / period if len(sub) == period else None
 
-# ===== 加強版 Yahoo 歷史資料快取（同一天只抓一次）=====
+# --- 工具函數：Yahoo 歷史資料快取 (同一天內只向 Yahoo 發送一次請求) ---
 @st.cache_data(ttl=86400, show_spinner=False)  # 快取 24 小時
 def get_yahoo_history(sid: str, max_n: int, cache_date: str):
     """
     抓取 Yahoo 歷史日線資料，並用日期當 cache key。
-    同一天內多次執行會直接使用快取，不會再向 Yahoo 發請求。
-    先試 .TW，失敗再試 .TWO（穩定優先）
+    優先嘗試 .TW (上市)，若失敗則嘗試 .TWO (上櫃)。
     """
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
@@ -76,7 +82,7 @@ def get_yahoo_history(sid: str, max_n: int, cache_date: str):
                     else:
                         t_dates.append("")
                         
-            # 最新在前面
+            # 回傳反轉後的陣列（讓最新資料排在最前面 index 0）
             return {
                 "cls": t_cls[::-1],
                 "highs": t_highs[::-1],
@@ -89,12 +95,13 @@ def get_yahoo_history(sid: str, max_n: int, cache_date: str):
             continue
     return None
 
+# --- 核心邏輯：抓取個股資料並計算技術訊號 ---
 def fetch_signals(sid, short_n, long_n):
     try:
         valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
         max_n = max(int(max(valid_ns)) + 60 if valid_ns else 60, 120)
         
-        # ===== 使用日期快取的 Yahoo 歷史資料 =====
+        # 1. 取得 Yahoo 歷史資料
         today_str = date.today().isoformat()
         hist = get_yahoo_history(sid, max_n, today_str)
         if hist is None:
@@ -107,14 +114,13 @@ def fetch_signals(sid, short_n, long_n):
         vols = hist["vols"][:]
         dates = hist["dates"][:]
         
-        # 判斷 Yahoo 最新一根是否已經是今天
         yahoo_has_today = bool(dates) and dates[0] == today_str
         req_len = int(max(valid_ns)) + 30 if valid_ns else 40
         
         if len(cls) < req_len:
             return None
             
-        # --- 獲取即時價格 (富果 API) ---
+        # 2. 獲取富果 (Fugle) API 即時價格
         f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
         f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
         
@@ -134,9 +140,10 @@ def fetch_signals(sid, short_n, long_n):
                 T_high = f_data.get("high", cur_price) if f_data.get("high", 0) > 0 else cur_price
                 T_vol = f_data.get("total", {}).get("tradeVolume", 0) or (vols[0] if vols else 0)
                 
+        # 3. 整合即時價與歷史 K 線
         if is_fugle_active:
             if yahoo_has_today:
-                # Yahoo 已經有今天 → 覆蓋最新一根，避免重複
+                # 若 Yahoo 已經更新今天，直接覆蓋第一根
                 cls[0] = T_close
                 highs[0] = T_high
                 lows[0] = T_low
@@ -149,7 +156,7 @@ def fetch_signals(sid, short_n, long_n):
                 Y_vol = vols[1] if len(vols) > 1 else None
                 B_close = cls[2] if len(cls) > 2 else None
             else:
-                # Yahoo 還沒有今天 → 新增一根到最前面
+                # 若 Yahoo 尚未更新今天，將即時價插入到最前面
                 Y_close = cls[0]
                 Y_high = highs[0]
                 Y_low = lows[0]
@@ -163,7 +170,7 @@ def fetch_signals(sid, short_n, long_n):
                 vols = [T_vol] + vols
                 dates = [today_str] + dates
         else:
-            # 沒有富果即時價，完全用 Yahoo
+            # 無富果即時價時，完全使用 Yahoo 資料
             T_close = cls[0]
             T_open = opens[0]
             T_low = lows[0]
@@ -186,7 +193,7 @@ def fetch_signals(sid, short_n, long_n):
         has_signal = False
         ma_list = [("短", short_n), ("長", long_n)]
         
-        # ===== 取出不含當日即時價的歷史序列 (對齊 GAS 的 slice(1)) =====
+        # 4. 建立不含當日即時價的歷史序列 (對齊 GAS 的 validCloses.slice(1))
         valid_closes = cls[1:]
         
         for label, n in ma_list:
@@ -196,6 +203,7 @@ def fetch_signals(sid, short_n, long_n):
             if len(cls) < n + 30:
                 continue
                 
+            # 計算均線：T_ma (含當日), Y_ma 與 B_ma (從歷史序列計算)
             T_ma = get_ma(cls, n, 0)
             Y_ma = get_ma(valid_closes, n, 0)
             B_ma = get_ma(valid_closes, n, 1)
@@ -206,19 +214,19 @@ def fetch_signals(sid, short_n, long_n):
             trend = "⬆️" if T_ma > Y_ma else "↘️"
             label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
             
-            # ===== 簡單突破均線 =====
+            # --- 訊號判斷 1：簡單突破均線 ---
             if Y_close <= Y_ma and T_close > T_ma:
                 gap_note = "跳空" if is_gap_up else ""
                 signals.append(f"🔥{gap_note}突破均線{label_str}")
                 has_signal = True
                 
-            # ===== 簡單跌破均線 =====
+            # --- 訊號判斷 2：簡單跌破均線 ---
             if Y_close >= Y_ma and T_close < T_ma:
                 gap_note = "跳空" if is_gap_down else ""
                 signals.append(f"📉{gap_note}跌破均線{label_str}")
                 has_signal = True
                 
-            # ===== 2日法則 =====
+            # --- 訊號判斷 3：2日法則 ---
             is_yesterday_breakout = (B_close < B_ma and Y_close > Y_ma)
             is_today_away = (T_low > T_ma)
             is_higher_than_yesterday = (T_close > Y_close)
@@ -228,7 +236,7 @@ def fetch_signals(sid, short_n, long_n):
                 signals.append(f"🔥{gap_note}2日法則(強勢突破){label_str}")
                 has_signal = True
                 
-            # ===== 反2日法則 =====
+            # --- 訊號判斷 4：反2日法則 (假跌破) ---
             y_break = (Y_close < Y_ma and B_close >= B_ma)
             if y_break and T_close > T_ma:
                 gap_note = "跳空" if is_gap_up else ""
@@ -238,7 +246,7 @@ def fetch_signals(sid, short_n, long_n):
                     signals.append(f"🔄{gap_note}反2日(假跌破){label_str}")
                 has_signal = True
                 
-        # ===== 量能標籤 =====
+        # 5. 量能標籤計算
         vol_tag = ""
         if Y_vol and T_vol > Y_vol * 1.5:
             vol_tag = "🔴爆量"
@@ -247,7 +255,7 @@ def fetch_signals(sid, short_n, long_n):
         elif Y_vol and T_vol > Y_vol:
             vol_tag = "量增"
             
-        # 畫圖資料（最近 60 根）
+        # 6. 整理近 60 根 K 線與均線繪圖資料
         plot_ma_short, plot_ma_long = [], []
         for i in range(60):
             if i >= len(cls):
@@ -277,6 +285,7 @@ def fetch_signals(sid, short_n, long_n):
         return None
     return None
 
+# --- 讀取 Google Sheet 單一分頁並進行多執行緒掃描 ---
 def run_scan_for_sheet(sheet_name, gid):
     results = []
     csv_url = f"{SHEET_BASE}/export?format=csv&gid={gid}&cb={int(time.time())}"
@@ -299,6 +308,7 @@ def run_scan_for_sheet(sheet_name, gid):
             name = row.iloc[1]
             tasks.append((sid, sn_raw, ln_raw, name))
             
+        # 使用執行緒池加速平行運算
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_stock = {
                 executor.submit(fetch_signals, t[0], t[1], t[2]): t
@@ -327,17 +337,19 @@ def run_scan_for_sheet(sheet_name, gid):
         st.error(f"讀取分頁【{sheet_name}】失敗: {e}")
     return results
 
+# --- 執行所有監控分頁的掃描 ---
 def run_all_scans():
     all_results = []
     for sheet in MONITOR_SHEETS:
         all_results.extend(run_scan_for_sheet(sheet["name"], sheet["gid"]))
     return all_results
 
-# ===== 主畫面 =====
+# ================= 主畫面 UI =================
 st.title("🐯 金虎南：轉折監控系統（純均線 + 2日法則）")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
 st.caption(f"最後更新時間：{update_time}｜主頁 + 4 個分頁連動｜Yahoo 歷史資料已啟用每日快取")
 
+# 功能按鈕
 col1, col2 = st.columns([1, 1])
 with col1:
     if st.button("🔄 同步所有分頁資料", use_container_width=True):
@@ -351,7 +363,9 @@ with col2:
 if "all_data" not in st.session_state:
     st.session_state["all_data"] = run_all_scans()
 
-# ===== 過濾規則 =====
+# ================= 過濾規則設定 =================
+# 1. 含有「跌破」相關訊號一律不顯示
+# 2. 必須符合「2日法則/反2日」或「具備量能增加」才顯示
 filtered_data = []
 for item in st.session_state["all_data"]:
     sig = str(item.get("訊號", ""))
@@ -365,6 +379,7 @@ for item in st.session_state["all_data"]:
     if is_two_day or has_volume:
         filtered_data.append(item)
 
+# ================= 結果呈現與繪圖 =================
 if filtered_data:
     st.subheader(f"📊 綜合監控結果 (共觸發 {len(filtered_data)} 檔個股)")
     df_display = pd.DataFrame(filtered_data).drop(columns=["plot_data"], errors="ignore")
@@ -382,22 +397,27 @@ if filtered_data:
                 expanded=False
             ):
                 fig = go.Figure()
+                # 繪製 K 線圖
                 fig.add_trace(go.Candlestick(
                     x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
                     increasing_line_color="#FF3333", increasing_fillcolor="#FF3333",
                     decreasing_line_color="#00A600", decreasing_fillcolor="#00A600",
                     line_width=1.8, name="K線"
                 ))
+                # 繪製短均線
                 if any(x is not None for x in p["ma_s"]):
                     fig.add_trace(go.Scatter(
                         x=p["dates"], y=p["ma_s"], mode="lines",
                         name="短均線", line=dict(color="#FFA500", width=1.8)
                     ))
+                # 繪製長均線
                 if any(x is not None for x in p["ma_l"]):
                     fig.add_trace(go.Scatter(
                         x=p["dates"], y=p["ma_l"], mode="lines",
                         name="長均線", line=dict(color="#1E90FF", width=1.8)
                     ))
+                
+                # 圖表排版設定
                 fig.update_layout(
                     xaxis_rangeslider_visible=False,
                     margin=dict(l=10, r=10, t=20, b=10),
@@ -406,7 +426,7 @@ if filtered_data:
                 )
                 fig.update_xaxes(type="category", tickangle=-45, nticks=15)
                 
-                # 關鍵：給每個圖表唯一的 key，避免 StreamlitDuplicateElementId
+                # 渲染 Plotly 圖表（帶有唯一 key 避免重複衝突）
                 st.plotly_chart(
                     fig,
                     use_container_width=True,
