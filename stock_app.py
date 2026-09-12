@@ -38,22 +38,21 @@ def get_ma(arr, period, offset=0):
     sub = arr[offset:offset + period]
     return sum(sub) / period if len(sub) == period else None
 
-
 # ===== 加強版 Yahoo 歷史資料快取（同一天只抓一次）=====
 @st.cache_data(ttl=86400, show_spinner=False)  # 快取 24 小時
 def get_yahoo_history(sid: str, max_n: int, cache_date: str):
     """
     抓取 Yahoo 歷史日線資料，並用日期當 cache key。
     同一天內多次執行會直接使用快取，不會再向 Yahoo 發請求。
+    先試 .TW，失敗再試 .TWO（穩定優先）
     """
     suffixes = [".TW", ".TWO"]
     for sfx in suffixes:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={max_n}d&interval=1d"
-            res = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            res = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
             if res.status_code != 200:
                 continue
-
             data = res.json()["chart"]["result"][0]
             quote = data["indicators"]["quote"][0]
             timestamps = data.get("timestamp", [])
@@ -89,7 +88,6 @@ def get_yahoo_history(sid: str, max_n: int, cache_date: str):
             continue
     return None
 
-
 def fetch_signals(sid, short_n, long_n):
     try:
         valid_ns = [n for n in [short_n, long_n] if pd.notna(n)]
@@ -98,16 +96,18 @@ def fetch_signals(sid, short_n, long_n):
         # ===== 使用日期快取的 Yahoo 歷史資料 =====
         today_str = date.today().isoformat()
         hist = get_yahoo_history(sid, max_n, today_str)
-
         if hist is None:
             return None
 
-        cls = hist["cls"]
-        highs = hist["highs"]
-        lows = hist["lows"]
-        opens = hist["opens"]
-        vols = hist["vols"]
-        dates = hist["dates"]
+        cls = hist["cls"][:]
+        highs = hist["highs"][:]
+        lows = hist["lows"][:]
+        opens = hist["opens"][:]
+        vols = hist["vols"][:]
+        dates = hist["dates"][:]
+
+        # 判斷 Yahoo 最新一根是否已經是今天
+        yahoo_has_today = bool(dates) and dates[0] == today_str
 
         req_len = int(max(valid_ns)) + 30 if valid_ns else 40
         if len(cls) < req_len:
@@ -116,6 +116,7 @@ def fetch_signals(sid, short_n, long_n):
         # --- 獲取即時價格 (富果 API) ---
         f_url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{sid}"
         f_res = requests.get(f_url, headers={"X-API-KEY": FUGLE_KEY}, timeout=5)
+
         is_fugle_active = False
         T_close = T_open = T_low = T_high = T_vol = None
         Y_close = Y_high = Y_low = Y_vol = None
@@ -123,34 +124,66 @@ def fetch_signals(sid, short_n, long_n):
 
         if f_res.status_code == 200:
             f_data = f_res.json().get("data", {}).get("quote", {})
-            cur_price = f_data.get("price", 0)
+            cur_price = f_data.get("price", 0) or f_data.get("lastPrice", 0)
             if cur_price and cur_price > 0:
                 is_fugle_active = True
                 T_close = cur_price
                 T_open = f_data.get("open", cur_price) if f_data.get("open", 0) > 0 else cur_price
                 T_low = f_data.get("low", cur_price) if f_data.get("low", 0) > 0 else cur_price
                 T_high = f_data.get("high", cur_price) if f_data.get("high", 0) > 0 else cur_price
-                T_vol = f_data.get("total", {}).get("tradeVolume", 0) or vols[0]
-                Y_close, Y_high, Y_low, Y_vol = cls[0], highs[0], lows[0], vols[0]
-                B_close = cls[1]
+                T_vol = f_data.get("total", {}).get("tradeVolume", 0) or (vols[0] if vols else 0)
 
-        if not is_fugle_active:
+        if is_fugle_active:
+            if yahoo_has_today:
+                # Yahoo 已經有今天 → 覆蓋最新一根，避免重複
+                cls[0] = T_close
+                highs[0] = T_high
+                lows[0] = T_low
+                opens[0] = T_open
+                vols[0] = T_vol
+                # dates[0] 已經是今天，不用改
+
+                Y_close = cls[1] if len(cls) > 1 else None
+                Y_high = highs[1] if len(highs) > 1 else None
+                Y_low = lows[1] if len(lows) > 1 else None
+                Y_vol = vols[1] if len(vols) > 1 else None
+                B_close = cls[2] if len(cls) > 2 else None
+            else:
+                # Yahoo 還沒有今天 → 新增一根到最前面
+                Y_close = cls[0]
+                Y_high = highs[0]
+                Y_low = lows[0]
+                Y_vol = vols[0]
+                B_close = cls[1] if len(cls) > 1 else None
+
+                cls = [T_close] + cls
+                highs = [T_high] + highs
+                lows = [T_low] + lows
+                opens = [T_open] + opens
+                vols = [T_vol] + vols
+                dates = [today_str] + dates
+        else:
+            # 沒有富果即時價，完全用 Yahoo
             T_close = cls[0]
             T_open = opens[0]
             T_low = lows[0]
             T_high = highs[0]
             T_vol = vols[0]
-            Y_close, Y_high, Y_low, Y_vol = cls[1], highs[1], lows[1], vols[1]
-            B_close = cls[2]
+            Y_close = cls[1] if len(cls) > 1 else None
+            Y_high = highs[1] if len(highs) > 1 else None
+            Y_low = lows[1] if len(lows) > 1 else None
+            Y_vol = vols[1] if len(vols) > 1 else None
+            B_close = cls[2] if len(cls) > 2 else None
 
-        is_gap_up = T_open > Y_high
-        is_gap_down = T_open < Y_low
+        if Y_close is None or B_close is None:
+            return None
+
+        is_gap_up = T_open > Y_high if Y_high is not None else False
+        is_gap_down = T_open < Y_low if Y_low is not None else False
+
         signals = []
         has_signal = False
         ma_list = [("短", short_n), ("長", long_n)]
-        hist_closes = cls if is_fugle_active else cls[1:]
-        hist_highs = highs if is_fugle_active else highs[1:]
-        hist_lows = lows if is_fugle_active else lows[1:]
 
         for label, n in ma_list:
             if pd.isna(n):
@@ -158,16 +191,14 @@ def fetch_signals(sid, short_n, long_n):
             n = int(n)
             if len(cls) < n + 30:
                 continue
-            if is_fugle_active:
-                T_ma = get_ma([T_close] + cls, n, 0)
-                Y_ma = get_ma(hist_closes, n, 0)
-                B_ma = get_ma(hist_closes, n, 1)
-            else:
-                T_ma = get_ma(cls, n, 0)
-                Y_ma = get_ma(hist_closes, n, 0)
-                B_ma = get_ma(hist_closes, n, 1)
+
+            T_ma = get_ma(cls, n, 0)
+            Y_ma = get_ma(cls, n, 1)
+            B_ma = get_ma(cls, n, 2)
+
             if T_ma is None or Y_ma is None or B_ma is None:
                 continue
+
             trend = "⬆️" if T_ma > Y_ma else "↘️"
             label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
 
@@ -204,21 +235,12 @@ def fetch_signals(sid, short_n, long_n):
 
         # ===== 量能標籤 =====
         vol_tag = ""
-        if T_vol > Y_vol * 1.5:
+        if Y_vol and T_vol > Y_vol * 1.5:
             vol_tag = "🔴爆量"
-        elif T_vol > Y_vol * 1.2:
+        elif Y_vol and T_vol > Y_vol * 1.2:
             vol_tag = "🔴量增"
-        elif T_vol > Y_vol:
+        elif Y_vol and T_vol > Y_vol:
             vol_tag = "量增"
-
-        # 合併即時資料給圖表用
-        if is_fugle_active:
-            cls = [T_close] + cls
-            highs = [T_high] + highs
-            lows = [T_low] + lows
-            opens = [T_open] + opens
-            dates = [time.strftime("%Y-%m-%d")] + dates
-            vols = [T_vol] + vols
 
         # 畫圖資料（最近 60 根）
         plot_ma_short, plot_ma_long = [], []
@@ -249,7 +271,6 @@ def fetch_signals(sid, short_n, long_n):
     except Exception:
         return None
     return None
-
 
 def run_scan_for_sheet(sheet_name, gid):
     results = []
@@ -301,13 +322,11 @@ def run_scan_for_sheet(sheet_name, gid):
         st.error(f"讀取分頁【{sheet_name}】失敗: {e}")
     return results
 
-
 def run_all_scans():
     all_results = []
     for sheet in MONITOR_SHEETS:
         all_results.extend(run_scan_for_sheet(sheet["name"], sheet["gid"]))
     return all_results
-
 
 # ===== 主畫面 =====
 st.title("🐯 金虎南：轉折監控系統（純均線 + 2日法則）")
@@ -321,8 +340,6 @@ with col1:
         st.rerun()
 with col2:
     if st.button("🚀 強制刷新即時報價", type="primary", use_container_width=True):
-        # 只重新跑掃描，Yahoo 歷史資料繼續使用今天的快取
-        # 富果即時報價會重新抓取
         st.session_state["all_data"] = run_all_scans()
         st.rerun()
 
@@ -337,15 +354,14 @@ filtered_data = []
 for item in st.session_state["all_data"]:
     sig = str(item.get("訊號", ""))
     vol = str(item.get("量能", ""))
-    
+
     is_two_day = "2日法則" in sig or "反2日" in sig
     is_breakdown = "跌破" in sig
     has_volume = vol in ["量增", "🔴量增", "🔴爆量"]
-    
-    # 有跌破就直接跳過，不顯示
+
     if is_breakdown:
         continue
-    
+
     if is_two_day or has_volume:
         filtered_data.append(item)
 
@@ -354,13 +370,18 @@ if filtered_data:
     df_display = pd.DataFrame(filtered_data).drop(columns=["plot_data"], errors="ignore")
     cols = ["來源工作表"] + [c for c in df_display.columns if c != "來源工作表"]
     st.dataframe(df_display[cols], use_container_width=True, hide_index=True)
+
     st.markdown("---")
     st.subheader("📈 觸發個股 K 線軌道圖（含均線）")
+
     for item in filtered_data:
         p = item.get("plot_data")
         sig_text = item["訊號"]
         if p:
-            with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
+            with st.expander(
+                f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】",
+                expanded=False
+            ):
                 fig = go.Figure()
                 fig.add_trace(go.Candlestick(
                     x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
@@ -385,11 +406,13 @@ if filtered_data:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 fig.update_xaxes(type="category", tickangle=-45, nticks=15)
+
+                # 關鍵：給每個圖表唯一的 key，避免 StreamlitDuplicateElementId
                 st.plotly_chart(
-    fig,
-    use_container_width=True,
-    config={"staticPlot": True},
-    key=f"chart_{item['來源工作表']}_{item['代號']}"
-)
+                    fig,
+                    use_container_width=True,
+                    config={"staticPlot": True},
+                    key=f"chart_{item['來源工作表']}_{item['代號']}"
+                )
 else:
     st.info("目前所有監控分頁中皆無符合條件的訊號。")
