@@ -385,6 +385,11 @@ if filtered_data:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
                 )
                 fig.update_xaxes(type="category", tickangle=-45, nticks=15)
-                st.plotly_chart(fig, use_container_width=True, config={"staticPlot": True})
+                st.plotly_chart(
+    fig,
+    use_container_width=True,
+    config={"staticPlot": True},
+    key=f"chart_{item['來源工作表']}_{item['代號']}"
+)
 else:
     st.info("目前所有監控分頁中皆無符合條件的訊號。")
