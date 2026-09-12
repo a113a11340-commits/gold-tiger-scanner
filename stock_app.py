@@ -24,7 +24,7 @@ st.markdown("""
 # --- Google Sheet 多分頁設定（新試算表） ---
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1OGsbVKW-h8xwWq_9EO-W172WvdPbfDwjTx533WKaaX4"
 MONITOR_SHEETS = [
-    {"name": "主頁", "gid": "0"},
+    {"name": "主頁", "gid": "21459"},
     {"name": "分頁1", "gid": "1779050796"},
     {"name": "分頁2", "gid": "462300633"},
     {"name": "分頁3", "gid": "1032414416"},
