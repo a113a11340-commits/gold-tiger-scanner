@@ -24,6 +24,7 @@ SHEET_BASE = "https://docs.google.com/spreadsheets/d/1OGsbVKW-h8xwWq_9EO-W172Wvd
 MONITOR_SHEETS = [
     {"name": "主頁", "gid": "0"},
     {"name": "工作表8", "gid": "2025298052"},
+    
 ]
 
 # --- 工具函數：計算移動平均線 (MA) ---
