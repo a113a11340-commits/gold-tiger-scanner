@@ -23,9 +23,7 @@ st.markdown("""
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1OGsbVKW-h8xwWq_9EO-W172WvdPbfDwjTx533WKaaX4"
 MONITOR_SHEETS = [
     {"name": "主頁", "gid": "0"},
-    {"name": "短均", "gid": "353487646"},
-    {"name": "中均", "gid": "1032414416"},
-    {"name": "長均", "gid": "1361333675"},
+    {"name": "工作表8", "gid": "2025298052"},
 ]
 
 # --- 工具函數：計算移動平均線 (MA) ---
