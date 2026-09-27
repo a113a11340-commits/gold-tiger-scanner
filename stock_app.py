@@ -19,10 +19,12 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-SHEET_BASE = "https://docs.google.com/spreadsheets/d/1a0pPIiRbNoZxX2eVE5FW27_qOIRESKyrZNQcPQjfWc4"
+# --- Google Sheet 多分頁設定 ---
+SHEET_BASE = "https://docs.google.com/spreadsheets/d/1OGsbVKW-h8xwWq_9EO-W172WvdPbfDwjTx533WKaaX4"
 MONITOR_SHEETS = [
     {"name": "主頁", "gid": "0"},
-    {"name": "工作表8", "gid": "2025298052"},
+    {"name": "分頁1", "gid": "1779050796"},   # 請改成你實際的分頁名稱
+    {"name": "分頁2", "gid": "462300633"},   # 請改成你實際的分頁名稱
 ]
 
 # --- 工具函數：計算移動平均線 (MA) ---
