@@ -5,11 +5,12 @@ import io
 import time
 import concurrent.futures
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # ==============================================================================
 # 1. 網頁基本設定與樣式
 # ==============================================================================
-st.set_page_config(layout="wide", page_title="金虎南-純均線監控 (完整訊號顯示版)")
+st.set_page_config(layout="wide", page_title="金虎南-純均線監控 (分頁排序版)")
 
 st.markdown("""
     <style>
@@ -20,14 +21,13 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==============================================================================
-# 連線池與快取設定 (維持高速掃描)
+# 全域 HTTP Session 與代號副檔名快取 (維持高速請求)
 # ==============================================================================
 HTTP_SESSION = requests.Session()
 adapter = requests.adapters.HTTPAdapter(pool_connections=30, pool_maxsize=30)
 HTTP_SESSION.mount("https://", adapter)
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
 
-# 記憶個股上市/上櫃副檔名 (.TW / .TWO)
 SYMBOL_CACHE = {}
 
 SHEET_BASE = "https://docs.google.com/spreadsheets/d/1OGsbVKW-h8xwWq_9EO-W172WvdPbfDwjTx533WKaaX4"
@@ -44,7 +44,7 @@ def get_ma(arr, period, offset=0):
     return sum(sub) / period if len(sub) == period else None
 
 # ==============================================================================
-# 2. 數據抓取
+# 2. 數據抓取模組
 # ==============================================================================
 def get_yahoo_history(sid: str, max_n: int):
     if sid in SYMBOL_CACHE:
@@ -149,19 +149,16 @@ def fetch_signals(sid, short_n, long_n):
             trend = "⬆️" if T_ma > Y_ma else "↘"
             label_str = f"{label}({n}MA:{T_ma:.2f}){trend}"
             
-            # --- 訊號 1：突破均線 ---
             if Y_close <= Y_ma and T_close > T_ma:
                 gap_note = "跳空" if is_gap_up else ""
                 signals.append(f"🔥{gap_note}突破均線{label_str}")
                 has_signal = True
                 
-            # --- 訊號 2：跌破均線 (現已正常顯示) ---
             if Y_close >= Y_ma and T_close < T_ma:
                 gap_note = "跳空" if is_gap_down else ""
                 signals.append(f"📉{gap_note}跌破均線{label_str}")
                 has_signal = True
                 
-            # --- 訊號 3：2日法則 ---
             is_yesterday_breakout = (B_close < B_ma and Y_close > Y_ma)
             is_today_away = (T_low > T_ma)
             is_higher_than_yesterday = (T_close > Y_close)
@@ -171,7 +168,6 @@ def fetch_signals(sid, short_n, long_n):
                 signals.append(f"🔥{gap_note}2日法則(強勢突破){label_str}")
                 has_signal = True
                 
-            # --- 訊號 4：反2日法則 ---
             y_break = (Y_close < Y_ma and B_close >= B_ma)
             if y_break and T_close > T_ma:
                 gap_note = "跳空" if is_gap_up else ""
@@ -197,8 +193,10 @@ def fetch_signals(sid, short_n, long_n):
             plot_ma_long.append(get_ma(cls, int(long_n), i) if pd.notna(long_n) else None)
             
         slice_len = min(60, len(cls))
+        
         p_data = {
             "dates": dates[:slice_len][::-1],
+            "vols": vols[:slice_len][::-1],
             "opens": opens[:slice_len][::-1],
             "highs": highs[:slice_len][::-1],
             "lows": lows[:slice_len][::-1],
@@ -280,9 +278,101 @@ def run_all_scans():
     return all_results
 
 # ==============================================================================
-# 3. 主介面區塊
+# 3. 排序與圖表渲染模組
 # ==============================================================================
-st.title("🐯 金虎南：轉折監控系統（純均線 + 2日法則）")
+def get_vol_score(vol_str):
+    """【調整說明】量能評分機制：爆量給 3 分、🔴量增給 2 分、量增給 1 分，用於優先排序"""
+    if "🔴爆量" in vol_str: return 3
+    if "🔴量增" in vol_str: return 2
+    if "量增" in vol_str: return 1
+    return 0
+
+def render_signal_group(data_list, group_name):
+    """【調整說明】渲染特定訊號分類的表格與上下子圖表（已移除日期與成交量文字）"""
+    if not data_list:
+        st.info(f"目前沒有符合【{group_name}】條件的個股訊號。")
+        return
+        
+    st.markdown(f"**共觸發 {len(data_list)} 檔個股**")
+    
+    # 顯示 DataFrame 表格
+    df_display = pd.DataFrame(data_list).drop(columns=["plot_data"], errors="ignore")
+    cols = ["來源工作表"] + [c for c in df_display.columns if c != "來源工作表"]
+    st.dataframe(df_display[cols], use_container_width=True, hide_index=True)
+    
+    # 繪製圖表迴圈
+    for idx, item in enumerate(data_list):
+        p = item.get("plot_data")
+        sig_text = item["訊號"]
+        if p:
+            with st.expander(f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】", expanded=False):
+                
+                # 【調整說明】使用 make_subplots 建立上下兩格：上方 K 線 (75%)、下方成交量柱狀圖 (25%)
+                fig = make_subplots(
+                    rows=2, cols=1, 
+                    shared_xaxes=True, 
+                    vertical_spacing=0.03, 
+                    row_heights=[0.75, 0.25]
+                )
+                
+                x_indices = list(range(len(p["dates"])))
+                
+                # ========== 上半部 (Row 1): K線與均線 ==========
+                fig.add_trace(go.Candlestick(
+                    x=x_indices, open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
+                    increasing_line_color="#FF3333", increasing_fillcolor="#FF3333",
+                    decreasing_line_color="#00A600", decreasing_fillcolor="#00A600",
+                    line_width=1.8, name="K線"
+                ), row=1, col=1)
+                
+                if any(x is not None for x in p["ma_s"]):
+                    fig.add_trace(go.Scatter(
+                        x=x_indices, y=p["ma_s"], mode="lines",
+                        name="短均線", line=dict(color="#FFA500", width=1.8)
+                    ), row=1, col=1)
+                    
+                if any(x is not None for x in p["ma_l"]):
+                    fig.add_trace(go.Scatter(
+                        x=x_indices, y=p["ma_l"], mode="lines",
+                        name="長均線", line=dict(color="#1E90FF", width=1.8)
+                    ), row=1, col=1)
+                
+                # ========== 下半部 (Row 2): 成交量獨立柱狀圖 ==========
+                # 依照收盤價大於等於開盤價來決定成交量柱體顏色（紅漲綠跌）
+                vol_colors = ['#FF3333' if p["closes"][i] >= p["opens"][i] else '#00A600' for i in range(len(p["closes"]))]
+                
+                fig.add_trace(go.Bar(
+                    x=x_indices, y=p["vols"], 
+                    marker_color=vol_colors, 
+                    name="成交量"
+                ), row=2, col=1)
+                
+                # ========== 版面與 X 軸隱藏設定 ==========
+                fig.update_layout(
+                    xaxis_rangeslider_visible=False,
+                    xaxis2_rangeslider_visible=False,
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    height=450,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                    showlegend=True
+                )
+                
+                # 【調整說明】完全隱藏上下圖表的 X 軸刻度與日期文字
+                fig.update_xaxes(showticklabels=False, showgrid=False, row=1, col=1)
+                fig.update_xaxes(showticklabels=False, showgrid=False, row=2, col=1)
+                
+                # 【調整說明】加上唯一的 key 避免 StreamlitDuplicateElementId 錯誤
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=True, 
+                    config={"staticPlot": True}, 
+                    key=f"chart_{group_name}_{idx}_{item['代號']}"
+                )
+
+# ==============================================================================
+# 4. 主介面與執行流程
+# ==============================================================================
+st.title("🐯 金虎南：轉折監控系統（多標籤分類與量增優先版）")
 update_time = time.strftime("%Y-%m-%d %H:%M:%S")
 st.caption(f"最後更新時間：{update_time}｜全 Yahoo Finance 即時 API 數據驅動")
 
@@ -301,52 +391,47 @@ if "all_data" not in st.session_state:
     st.session_state["all_data"] = run_all_scans()
 
 # ==============================================================================
-# 4. 訊號結果呈現（已包含「跌破均線」）
+# 5. 資料分流與量增排序邏輯
 # ==============================================================================
-# 只要觸發任何訊號（突破、跌破、2日法則、反2日法則），直接完整輸出
-filtered_data = st.session_state["all_data"]
+list_breakout = []
+list_breakdown = []
+list_2day = []
+list_anti2day = []
 
-if filtered_data:
-    st.subheader(f"📊 綜合監控結果 (共觸發 {len(filtered_data)} 檔個股)")
-    df_display = pd.DataFrame(filtered_data).drop(columns=["plot_data"], errors="ignore")
-    cols = ["來源工作表"] + [c for c in df_display.columns if c != "來源工作表"]
-    st.dataframe(df_display[cols], use_container_width=True, hide_index=True)
-    st.markdown("---")
+# 將資料分類至對應的清單
+for item in st.session_state["all_data"]:
+    sig = str(item.get("訊號", ""))
     
-    st.subheader("📈 觸發個股 K 線軌道圖（含均線）")
-    for item in filtered_data:
-        p = item.get("plot_data")
-        sig_text = item["訊號"]
-        if p:
-            with st.expander(
-                f"🔍 [{item['來源工作表']}] {item['代號']} {item['名稱']} — 【{sig_text}】",
-                expanded=False
-            ):
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(
-                    x=p["dates"], open=p["opens"], high=p["highs"], low=p["lows"], close=p["closes"],
-                    increasing_line_color="#FF3333", increasing_fillcolor="#FF3333",
-                    decreasing_line_color="#00A600", decreasing_fillcolor="#00A600",
-                    line_width=1.8, name="K線"
-                ))
-                if any(x is not None for x in p["ma_s"]):
-                    fig.add_trace(go.Scatter(
-                        x=p["dates"], y=p["ma_s"], mode="lines",
-                        name="短均線", line=dict(color="#FFA500", width=1.8)
-                    ))
-                if any(x is not None for x in p["ma_l"]):
-                    fig.add_trace(go.Scatter(
-                        x=p["dates"], y=p["ma_l"], mode="lines",
-                        name="長均線", line=dict(color="#1E90FF", width=1.8)
-                    ))
-                
-                fig.update_layout(
-                    xaxis_rangeslider_visible=False,
-                    margin=dict(l=10, r=10, t=20, b=10),
-                    height=380,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
-                )
-                fig.update_xaxes(type="category", tickangle=-45, nticks=15)
-                st.plotly_chart(fig, use_container_width=True, config={"staticPlot": True})
-else:
-    st.info("目前沒有符合條件的個股訊號。")
+    if "突破均線" in sig:
+        list_breakout.append(item)
+    if "跌破均線" in sig:
+        list_breakdown.append(item)
+    if "2日法則" in sig and "反2日" not in sig:
+        list_2day.append(item)
+    if "反2日" in sig:
+        list_anti2day.append(item)
+
+# 【調整說明】套用量能評分進行排序，確保有量增的個股排在最前面
+list_breakout.sort(key=lambda x: get_vol_score(x.get("量能", "")), reverse=True)
+list_breakdown.sort(key=lambda x: get_vol_score(x.get("量能", "")), reverse=True)
+list_2day.sort(key=lambda x: get_vol_score(x.get("量能", "")), reverse=True)
+list_anti2day.sort(key=lambda x: get_vol_score(x.get("量能", "")), reverse=True)
+
+# ==============================================================================
+# 6. 建立四個獨立標籤頁 (Tabs) 顯示
+# ==============================================================================
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔥 突破均線", 
+    "📉 跌破均線", 
+    "🔥 2日法則(續強)", 
+    "🔄 反2日(假跌破)"
+])
+
+with tab1:
+    render_signal_group(list_breakout, "突破均線")
+with tab2:
+    render_signal_group(list_breakdown, "跌破均線")
+with tab3:
+    render_signal_group(list_2day, "2日法則")
+with tab4:
+    render_signal_group(list_anti2day, "反2日法則")
