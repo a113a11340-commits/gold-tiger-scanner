@@ -1,17 +1,20 @@
 """
 ================================================================================
-台股九策略監控系統（Streamlit 完整版 v7）
+台股精選訊號監控系統（Streamlit v8.1）
 ================================================================================
-【v7】
-1. 第9策略：KD(9)+RSI 共振（買／賣分開用半年掃描裡樣本較可用的參數）
-2. 內含半年參數比較表（RSI 6/10/12/14/24 × 20/80與30/70 × 當天/前後1天/前後2天）
-3. 勝率只顯示百分比，寫在訊號文字裡
-4. 買進／停損／目標合併一格；量能改顯示成交張數
+【買進】
+1. 周線多頭 + 三白兵          48.8%
+2. 破底翻                     48.2%
+3. 周線多頭 + 黏合後打開 + 晨星 46.3%
+4. 周線多頭 + 爆量 + 三白兵    45.7%
+5. RSI 鈍化                   45.6%
+6. 一次／二度多頭背離（RSI5、RSI10）  底背離歷史約 43.4%
 
-風險：勝率為樣本觀察，未扣成本，不構成投資建議。
-KD 週期影片沒講死，程式固定用常見的 9。
-共振窗口：影片沒明確說同天或前後幾天，三種都測過。
-半年掃描股票＝主要清單前 40 檔（多為傳產），不是全市場。
+【賣出】僅保留勝率最高
+1. RSI 頂背離（RSI5、RSI10，含二度）  54.4%
+
+已刪除：跌破長均線及其他低勝率策略。
+勝率為歷史樣本、未扣成本，不構成投資建議。
 ================================================================================
 """
 
@@ -25,9 +28,8 @@ import numpy as np
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(layout="wide", page_title="台股九策略 v7")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v8.1")
 
-# 手機友善：字級16、粗體、換行
 st.markdown("""
 <style>
 .block-container { padding-top: 1rem; padding-bottom: 1rem; }
@@ -39,113 +41,20 @@ td { font-size: 16px !important; font-weight: bold !important;
      max-width: 280px !important; }
 .buy-text { color: #E53935 !important; font-weight: bold; font-size: 16px; }
 .sell-text { color: #43A047 !important; font-weight: bold; font-size: 16px; }
-.stMarkdown, .stCaption, p, li { font-size: 16px !important; }
-div[data-testid="stDataFrame"] { font-size: 16px !important; font-weight: bold !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ==============================================================================
-# 歷史勝率（寫死，來源：過去約3個月隔日收盤回測）
-# key = 訊號文字關鍵字或部分匹配；顯示在策略旁
-# ==============================================================================
-HARDCODED_WINRATES = {
-    # 均線轉折
-    "跌破均線(短20)": {"n": 4897, "rate": 45.9, "avg": 0.03},
-    "突破均線(短20)": {"n": 4812, "rate": 38.9, "avg": -0.08},
-    "跌破均線(長60)": {"n": 2752, "rate": 49.9, "avg": 0.31},
-    "突破均線(長60)": {"n": 2583, "rate": 39.1, "avg": -0.08},
-    "2日法則(短20)": {"n": 1336, "rate": 40.0, "avg": -0.13},
-    "反2日(短20)": {"n": 1306, "rate": 37.4, "avg": -0.14},
-    "2日法則(長60)": {"n": 739, "rate": 41.8, "avg": -0.05},
-    "反2日(長60)": {"n": 651, "rate": 39.3, "avg": -0.12},
-    # 周線多頭
-    "均線多頭排列": {"n": 3318, "rate": 42.6, "avg": -0.08},
-    "均線多頭排列 + 爆量": {"n": 1502, "rate": 40.6, "avg": -0.19},
-    "均線多頭排列 + 均線黏合後打開": {"n": 953, "rate": 41.6, "avg": -0.07},
-    "均線多頭排列 + 均線黏合後打開 + 爆量": {"n": 730, "rate": 43.2, "avg": -0.08},
-    "均線多頭排列 + 晨星": {"n": 310, "rate": 42.6, "avg": -0.25},
-    "均線多頭排列 + 爆量 + 晨星": {"n": 144, "rate": 39.6, "avg": -0.12},
-    "均線多頭排列 + 三白兵": {"n": 86, "rate": 48.8, "avg": 0.19},
-    "均線多頭排列 + 均線黏合後打開 + 爆量 + 晨星": {"n": 67, "rate": 43.3, "avg": 0.48},
-    "均線多頭排列 + 爆量 + 三白兵": {"n": 46, "rate": 45.7, "avg": 0.40},
-    "均線多頭排列 + 均線黏合後打開 + 晨星": {"n": 41, "rate": 46.3, "avg": 0.10},
-    "均線多頭排列 + 均線黏合後打開 + 三白兵": {"n": 35, "rate": 42.9, "avg": 0.05},
-    "均線多頭排列 + 均線黏合後打開 + 爆量 + 三白兵": {"n": 28, "rate": 42.9, "avg": -0.41},
-    # 假突破
-    "破底翻：跌破前低後站回": {"n": 1691, "rate": 48.2, "avg": 0.24},
-    "真突破：突破前高+放量": {"n": 892, "rate": 42.7, "avg": -0.01},
-    # RSI
-    "頂背離：價格新高RSI降低": {"n": 1205, "rate": 54.4, "avg": 0.33},
-    "底背離：價格新低RSI抬高": {"n": 776, "rate": 43.4, "avg": -0.27},
-    "RSI鈍化：連續5日≥70+站上五日線": {"n": 390, "rate": 45.6, "avg": -0.32},
-    # 一夜持股
-    "一夜持股：漲3～5%+曾漲停+量增+多頭": {"n": 28, "rate": 28.6, "avg": -0.36},
+# 寫死勝率（只顯示百分比）
+WINRATE = {
+    "三白兵": "48.8%",
+    "破底翻": "48.2%",
+    "黏合晨星": "46.3%",
+    "爆量三白兵": "45.7%",
+    "RSI鈍化": "45.6%",
+    "多頭背離": "43.4%",
+    "頂背離": "54.4%",
 }
 
-# 策略層級摘要（取代表性）
-STRATEGY_SUMMARY = {
-    "均線轉折": "突破短約39%｜跌破短約46%｜跌破長約50%",
-    "周線多頭": "多頭排列約43%｜+三白兵約49%｜+爆量約41%",
-    "金包銀": "本次回測樣本不足未列出",
-    "RSI抄底": "本次回測樣本不足未列出",
-    "假突破破底翻": "破底翻約48%｜真突破約43%",
-    "一夜持股": "約29%（樣本僅28，極不穩）",
-    "RSI背離": "一次／二度背離皆會標註｜歷史頂約54%｜底約43%（舊規則樣本）",
-    "RSI鈍化": "約46%",
-    "KD+RSI共振": "KD9＋RSI10｜K>50且RSI≥60買｜K<50且RSI≤40賣｜一邊早到位、另一邊今日到位即出訊",
-}
-
-
-def lookup_winrate(signal_text: str) -> str:
-    """依訊號文字找最接近的寫死勝率"""
-    if not signal_text:
-        return ""
-    # 精確
-    if signal_text in HARDCODED_WINRATES:
-        w = HARDCODED_WINRATES[signal_text]
-        return f"{w['rate']}%"
-    # 部分匹配（取最長 key）
-    best = None
-    best_len = 0
-    for k, w in HARDCODED_WINRATES.items():
-        if k in signal_text or signal_text in k:
-            if len(k) > best_len:
-                best, best_len = w, len(k)
-    # 關鍵字
-    if best is None:
-        checks = [
-            ("頂背離", "頂背離：價格新高RSI降低"),
-            ("底背離", "底背離：價格新低RSI抬高"),
-            ("破底翻", "破底翻：跌破前低後站回"),
-            ("真突破", "真突破：突破前高+放量"),
-            ("RSI鈍化", "RSI鈍化：連續5日≥70+站上五日線"),
-            ("一夜持股", "一夜持股：漲3～5%+曾漲停+量增+多頭"),
-            ("三白兵", "均線多頭排列 + 三白兵"),
-            ("晨星", "均線多頭排列 + 晨星"),
-            ("黏合", "均線多頭排列 + 均線黏合後打開"),
-            ("爆量", "均線多頭排列 + 爆量"),
-            ("多頭排列", "均線多頭排列"),
-            ("跌破均線(短", "跌破均線(短20)"),
-            ("突破均線(短", "突破均線(短20)"),
-            ("跌破均線(長", "跌破均線(長60)"),
-            ("突破均線(長", "突破均線(長60)"),
-            ("2日法則(短", "2日法則(短20)"),
-            ("反2日(短", "反2日(短20)"),
-            ("2日法則(長", "2日法則(長60)"),
-            ("反2日(長", "反2日(長60)"),
-        ]
-        for tip, key in checks:
-            if tip in signal_text and key in HARDCODED_WINRATES:
-                best = HARDCODED_WINRATES[key]
-                break
-    if best:
-        return f"{best['rate']}%"
-    return "—"
-
-
-# ==============================================================================
-# Sheet
-# ==============================================================================
 MAIN_SHEET = {
     "base": "https://docs.google.com/spreadsheets/d/13Mv-7uaFyR1KcxNRVrhxCGAAntElKprB7ZeWWBxS3n0",
     "gid": "0",
@@ -159,15 +68,6 @@ MA_SHEETS = [
 
 CONFIG = {
     "MIN_VOLUME": 500000,
-    "RSI_PERIOD": 14,
-    "RSI_OVERSOLD": 15,
-    "RSI_DIVERGENCE_LOOKBACK": 30,
-    "RSI_PASSIVATION_DAYS": 5,
-    "RSI_PASSIVATION_LEVEL": 70,
-    "OVERNIGHT_MIN_CHG": 0.03,
-    "OVERNIGHT_MAX_CHG": 0.05,
-    "OVERNIGHT_LIMIT_UP": 0.095,
-    "OVERNIGHT_VOL_RATIO": 1.4,
     "BATCH_WORKERS": 20,
     "CACHE_TTL": 300,
 }
@@ -313,63 +213,18 @@ def load_ma_stocks():
     return tasks
 
 
-# ==============================================================================
-# 八大策略
-# ==============================================================================
-def analyze_ma_signals(hist, short_n, long_n):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < max(short_n, long_n) + 30:
-        return None
-    T_close, T_open, T_high, T_low, T_vol = closes[-1], opens[-1], highs[-1], lows[-1], vols[-1]
-    Y_close, Y_high, Y_low, Y_vol = closes[-2], highs[-2], lows[-2], vols[-2]
-    B_close = closes[-3]
-    is_gap_up = T_open > Y_high
-    is_gap_down = T_open < Y_low
-    signals, direction = [], None
-    for label, period in [("短", short_n), ("長", long_n)]:
-        if n < period + 5:
-            continue
-        ma_list = calc_ma_list(closes, period)
-        if ma_list[-1] is None or ma_list[-2] is None or ma_list[-3] is None:
-            continue
-        T_ma, Y_ma, B_ma = ma_list[-1], ma_list[-2], ma_list[-3]
-        trend = "⬆️" if T_ma > Y_ma else "↘"
-        label_str = f"{label}({period}MA:{T_ma:.2f}){trend}"
-        if Y_close <= Y_ma and T_close > T_ma:
-            signals.append(f"🔥{'跳空' if is_gap_up else ''}突破均線{label_str}")
-            direction = "買進"
-        if Y_close >= Y_ma and T_close < T_ma:
-            signals.append(f"📉{'跳空' if is_gap_down else ''}跌破均線{label_str}")
-            direction = "賣出／減碼"
-        if (B_close < B_ma and Y_close > Y_ma) and (T_low > T_ma) and (T_close > Y_close):
-            signals.append(f"🔥{'跳空' if is_gap_up else ''}2日法則{label_str}")
-            direction = "買進"
-        if (Y_close < Y_ma and B_close >= B_ma) and T_close > T_ma:
-            signals.append(f"🔄{'跳空' if is_gap_up else ''}反2日{label_str}")
-            direction = "買進"
-    if not signals or direction is None:
-        return None
-    vol_tag = ""
-    if Y_vol and T_vol > Y_vol * 1.5:
-        vol_tag = "🔴爆量"
-    elif Y_vol and T_vol > Y_vol * 1.2:
-        vol_tag = "🔴量增"
-    entry = round(T_close * 1.005, 2) if direction == "買進" else "-"
-    stop = round(min(T_low, T_close * 0.97), 2) if direction == "買進" else round(T_close * 1.03, 2)
-    target = round(T_close * 1.06, 2) if direction == "買進" else round(T_close * 0.94, 2)
-    sig = " + ".join(signals)
+def _pack(sid, name, sheet, hist, price, signal, direction, entry, stop, target, how, side, wr):
     return {
-        "price": T_close, "signal": sig, "vol": vol_tag,
-        "strategy": "均線轉折", "direction": direction,
-        "entry": entry, "stop": stop, "target": target,
-        "how": "突破類→隔日開盤附近買，停損均線下；跌破→減碼或出場",
-        "side": "long" if direction == "買進" else "short",
-        "winrate": lookup_winrate(sig),
+        "sid": sid, "name": name, "sheet": sheet, "hist": hist,
+        "price": price, "signal": f"{signal}｜勝率{wr}", "direction": direction,
+        "entry": entry, "stop": stop, "target": target, "how": how,
+        "side": side, "winrate": wr,
+        "lots": int(hist["vols"][-1] // 1000),
     }
 
 
-def analyze_weekly_bull(hist):
+# ---------- 買1／4：多頭排列 + 三白兵（可選爆量） ----------
+def analyze_bull_sanbaibing(hist, require_volume_surge=False):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -377,303 +232,105 @@ def analyze_weekly_bull(hist):
     ma5 = calc_ma_list(closes, 5)
     ma10 = calc_ma_list(closes, 10)
     ma20 = calc_ma_list(closes, 20)
-    if None in (ma5[-1], ma10[-1], ma20[-1], ma5[-2], ma10[-2], ma20[-2]):
+    if None in (ma5[-1], ma10[-1], ma20[-1]):
         return None
-    bull_align = ma5[-1] > ma10[-1] > ma20[-1] and closes[-1] > ma5[-1]
-    sticky = False
-    if ma5[-3] and ma10[-3] and ma20[-3]:
-        prev_spread = max(ma5[-3], ma10[-3], ma20[-3]) - min(ma5[-3], ma10[-3], ma20[-3])
-        curr_spread = max(ma5[-1], ma10[-1], ma20[-1]) - min(ma5[-1], ma10[-1], ma20[-1])
-        if prev_spread / ma20[-3] < 0.025 and curr_spread > prev_spread * 1.5 and ma5[-1] > ma10[-1]:
-            sticky = True
-    avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
-    volume_surge = avg5_vol > 0 and vols[-1] >= avg5_vol * 1.5
+    if not (ma5[-1] > ma10[-1] > ma20[-1] and closes[-1] > ma5[-1]):
+        return None
     d0, d1, d2 = closes[-1], closes[-2], closes[-3]
     o0, o1, o2 = opens[-1], opens[-2], opens[-3]
-    k_name = ""
-    if (d0 > o0 and d1 > o1 and d2 > o2 and d0 > d1 > d2 and
-            o1 >= min(o2, d2) and o1 <= max(o2, d2) and o0 >= min(o1, d1) and o0 <= max(o1, d1)):
-        k_name = "三白兵"
-    elif (d2 < o2 and abs(d1 - o1) <= (highs[-2] - lows[-2]) * 0.35 and d0 > o0 and d0 >= (d2 + o2) / 2):
-        k_name = "晨星"
-    if not bull_align:
+    is_san = (
+        d0 > o0 and d1 > o1 and d2 > o2 and d0 > d1 > d2 and
+        o1 >= min(o2, d2) and o1 <= max(o2, d2) and
+        o0 >= min(o1, d1) and o0 <= max(o1, d1)
+    )
+    if not is_san:
         return None
-    parts = ["均線多頭排列"]
-    if sticky:
-        parts.append("均線黏合後打開")
-    if volume_surge:
-        parts.append("爆量")
-    if k_name:
-        parts.append(k_name)
-    sig = " + ".join(parts)
+    avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
+    volume_surge = avg5_vol > 0 and vols[-1] >= avg5_vol * 1.5
+    if require_volume_surge and not volume_surge:
+        return None
+    if require_volume_surge:
+        sig, wr = "均線多頭排列 + 爆量 + 三白兵", WINRATE["爆量三白兵"]
+    else:
+        # 純三白兵：若同時爆量，讓「爆量三白兵」訊號優先，這裡不重複
+        if volume_surge:
+            return None
+        sig, wr = "均線多頭排列 + 三白兵", WINRATE["三白兵"]
     return {
-        "price": closes[-1], "signal": sig,
-        "vol": "🔴爆量" if volume_surge else ("量增" if vols[-1] > vols[-2] else ""),
-        "strategy": "周線多頭", "direction": "買進",
+        "signal": sig, "direction": "買進", "side": "long", "winrate": wr,
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(lows[-1], closes[-1] * 0.97, ma10[-1] * 0.99), 2),
         "target": round(closes[-1] * 1.08, 2),
-        "how": "回檔不破MA10再買；停損MA10下",
-        "side": "long",
-        "winrate": lookup_winrate(sig),
+        "how": "回檔不破 MA10 再買；停損 MA10 下",
+        "price": closes[-1],
     }
 
 
-def analyze_jinbaoyin(hist):
-    closes, lows, vols = hist["closes"], hist["lows"], hist["vols"]
+# ---------- 買3：多頭排列 + 黏合後打開 + 晨星 ----------
+def analyze_bull_sticky_morning(hist):
+    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
-    if n < 250 or vols[-1] < 800000:
+    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
     ma5 = calc_ma_list(closes, 5)
     ma10 = calc_ma_list(closes, 10)
     ma20 = calc_ma_list(closes, 20)
-    ma60 = calc_ma_list(closes, 60)
-    ma120 = calc_ma_list(closes, 120)
-    ma240 = calc_ma_list(closes, 240)
-    if None in (ma60[-1], ma120[-1]):
+    if None in (ma5[-1], ma10[-1], ma20[-1], ma5[-3], ma10[-3], ma20[-3]):
         return None
-    has_long_down = (ma120[-1] < ma120[-7]) or (ma240[-1] is not None and ma240[-1] < ma240[-7])
-    if not has_long_down:
+    if not (ma5[-1] > ma10[-1] > ma20[-1] and closes[-1] > ma5[-1]):
         return None
-    if ma60[-1] - ma60[-7] < -0.008 * ma60[-1]:
+    prev_spread = max(ma5[-3], ma10[-3], ma20[-3]) - min(ma5[-3], ma10[-3], ma20[-3])
+    curr_spread = max(ma5[-1], ma10[-1], ma20[-1]) - min(ma5[-1], ma10[-1], ma20[-1])
+    sticky = prev_spread / ma20[-3] < 0.025 and curr_spread > prev_spread * 1.5 and ma5[-1] > ma10[-1]
+    if not sticky:
         return None
-    if not (ma5[-1] > ma60[-1] and ma10[-1] > ma60[-1] and ma20[-1] > ma60[-1] and closes[-1] > ma60[-1]):
+    d0, d2 = closes[-1], closes[-3]
+    o0, o1, o2 = opens[-1], opens[-2], opens[-3]
+    is_morning = (
+        d2 < o2 and abs(closes[-2] - o1) <= (highs[-2] - lows[-2]) * 0.35 and
+        d0 > o0 and d0 >= (d2 + o2) / 2
+    )
+    if not is_morning:
         return None
-    if lows[-1] < min(lows[-21:-1]) * 0.995:
-        return None
-    sig = "金包銀：長天期下壓+生命線支撐"
     return {
-        "price": closes[-1], "signal": sig, "vol": "",
-        "strategy": "金包銀", "direction": "買進（中期反彈）",
+        "signal": "均線多頭排列 + 均線黏合後打開 + 晨星",
+        "direction": "買進", "side": "long", "winrate": WINRATE["黏合晨星"],
         "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(ma60[-1] * 0.98, closes[-1] * 0.96), 2),
-        "target": round(closes[-1] * 1.10, 2),
-        "how": "靠近MA60承接，停損生命線下約2%",
-        "side": "long",
-        "winrate": lookup_winrate(sig),
+        "stop": round(min(lows[-1], closes[-1] * 0.97, ma10[-1] * 0.99), 2),
+        "target": round(closes[-1] * 1.08, 2),
+        "how": "晨星＋黏合打開，回檔不破 MA10；停損 MA10 下",
+        "price": closes[-1],
     }
 
 
-def analyze_rsi_oversold(hist):
-    closes, lows, vols = hist["closes"], hist["lows"], hist["vols"]
-    n = len(closes)
-    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    rsi = calc_rsi(closes, CONFIG["RSI_PERIOD"])
-    if rsi[-1] is None or rsi[-2] is None:
-        return None
-    if rsi[-1] > CONFIG["RSI_OVERSOLD"] or rsi[-2] > CONFIG["RSI_OVERSOLD"] or rsi[-1] <= rsi[-2]:
-        return None
-    ma20 = calc_ma_list(closes, 20)
-    if ma20[-1] is None or closes[-1] < ma20[-1]:
-        return None
-    sig = f"RSI抄底：RSI={rsi[-1]:.1f}≤{CONFIG['RSI_OVERSOLD']}且向上"
-    return {
-        "price": closes[-1], "signal": sig, "vol": "",
-        "strategy": "RSI抄底", "direction": "買進（短線反彈）",
-        "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1] * 0.98, closes[-1] * 0.97), 2),
-        "target": round(closes[-1] * 1.06, 2),
-        "how": "隔日低點不破再買，停損當日低點下2～3%",
-        "side": "long",
-        "winrate": lookup_winrate(sig),
-    }
-
-
-def analyze_fake_break(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
+# ---------- 買2：破底翻 ----------
+def analyze_break_bottom_flip(hist):
+    closes, highs, lows, vols = hist["closes"], hist["highs"], hist["lows"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < 800000:
         return None
     prev_low = min(lows[-23:-3])
     if any(l < prev_low * 0.995 for l in lows[-3:]) and closes[-1] > prev_low:
-        sig = f"破底翻：跌破前低{prev_low:.2f}後站回"
         return {
-            "price": closes[-1], "signal": sig, "vol": "",
-            "strategy": "假突破破底翻", "direction": "買進",
-            "entry": round(closes[-1] * 1.005, 2), "stop": round(prev_low * 0.985, 2),
-            "target": round(closes[-1] * 1.07, 2),
-            "how": "站回前低後買，停損前低下約1.5%", "side": "long",
-            "winrate": lookup_winrate("破底翻：跌破前低後站回"),
-        }
-    prev_high = max(highs[-21:-1])
-    if closes[-1] > prev_high:
-        avg_vol = sum(vols[-21:-1]) / 20
-        body = abs(closes[-1] - opens[-1])
-        rng = highs[-1] - lows[-1]
-        if avg_vol > 0 and vols[-1] >= avg_vol * 1.5 and rng > 0 and body / rng >= 0.55:
-            sig = f"真突破：突破前高{prev_high:.2f}+放量"
-            return {
-                "price": closes[-1], "signal": sig, "vol": "🔴爆量",
-                "strategy": "假突破破底翻", "direction": "買進",
-                "entry": round(closes[-1] * 1.005, 2),
-                "stop": round(min(lows[-1], prev_high * 0.99), 2),
-                "target": round(closes[-1] * 1.08, 2),
-                "how": "回測不破前高再買", "side": "long",
-                "winrate": lookup_winrate("真突破：突破前高+放量"),
-            }
-    return None
-
-
-def analyze_overnight(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 30 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    change = (closes[-1] - closes[-2]) / closes[-2]
-    if not (CONFIG["OVERNIGHT_MIN_CHG"] <= change <= CONFIG["OVERNIGHT_MAX_CHG"]):
-        return None
-    has_limit = any(
-        (closes[i] - closes[i - 1]) / closes[i - 1] >= CONFIG["OVERNIGHT_LIMIT_UP"]
-        for i in range(max(-20, -n + 1), 0)
-    )
-    if not has_limit:
-        return None
-    avg5 = sum(vols[-6:-1]) / 5
-    if avg5 <= 0 or vols[-1] / avg5 < CONFIG["OVERNIGHT_VOL_RATIO"]:
-        return None
-    if not (vols[-1] > vols[-2] > vols[-3]):
-        return None
-    ma5 = calc_ma_list(closes, 5)
-    ma10 = calc_ma_list(closes, 10)
-    ma20 = calc_ma_list(closes, 20)
-    if None in (ma5[-1], ma10[-1], ma20[-1]) or not (ma5[-1] > ma10[-1] > ma20[-1]):
-        return None
-    if closes[-1] <= opens[-1]:
-        return None
-    rng = highs[-1] - lows[-1]
-    if rng > 0 and (highs[-1] - closes[-1]) / rng > 0.30:
-        return None
-    entry_min, entry_max = round(closes[-1] * 0.995, 2), round(closes[-1] * 1.010, 2)
-    sig = f"一夜持股：漲幅{change*100:.1f}%｜隔日開盤{entry_min}~{entry_max}"
-    return {
-        "price": closes[-1], "signal": sig, "vol": "🔴量增",
-        "strategy": "一夜持股", "direction": "買進（只抱一天）",
-        "entry": f"{entry_min}~{entry_max}", "stop": round(closes[-1] * 0.97, 2),
-        "target": round(closes[-1] * 1.04, 2),
-        "how": "隔日開盤在區間才買，當日收盤前必平倉", "side": "long",
-        "winrate": lookup_winrate("一夜持股：漲3～5%+曾漲停+量增+多頭"),
-    }
-
-
-def _swing_indices(values, order=3, find_min=True):
-    """找局部高低點索引（order=左右各看幾根）。"""
-    out = []
-    n = len(values)
-    for i in range(order, n - order):
-        window = values[i - order:i + order + 1]
-        if find_min:
-            if values[i] == min(window) and values[i] == min(values[max(0, i - order):i + 1]):
-                out.append(i)
-        else:
-            if values[i] == max(window) and values[i] == max(values[max(0, i - order):i + 1]):
-                out.append(i)
-    return out
-
-
-def analyze_rsi_divergence(hist):
-    """
-    RSI 背離（對齊今周刊口訣）
-    - 多頭／底背離：價格創新低、RSI 未創低 → 買點浮現
-    - 空頭／頂背離：價格創新高、RSI 未創高 → 賣點浮現
-    - 二度背離：同一段趨勢內出現兩次背離，通常較具參考性
-    指標用 RSI(6)（影片圖例為 6 日 RSI）。
-    """
-    closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
-    n = len(closes)
-    if n < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    # 影片範例用 6 日 RSI
-    rsi = calc_rsi(closes, 6)
-    if any(x is None for x in rsi[-50:]):
-        return None
-
-    look = min(80, n - 1)
-    swing_lows = _swing_indices(lows[-look:], order=3, find_min=True)
-    swing_highs = _swing_indices(highs[-look:], order=3, find_min=False)
-    # 轉成絕對索引
-    base = n - look
-    swing_lows = [base + i for i in swing_lows]
-    swing_highs = [base + i for i in swing_highs]
-
-    def bull_div_pairs(idxs):
-        pairs = []
-        for a, b in zip(idxs, idxs[1:]):
-            # 價格更低、RSI 更高 → 多頭背離
-            if lows[b] < lows[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] > rsi[a]:
-                pairs.append((a, b))
-        return pairs
-
-    def bear_div_pairs(idxs):
-        pairs = []
-        for a, b in zip(idxs, idxs[1:]):
-            if highs[b] > highs[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] < rsi[a]:
-                pairs.append((a, b))
-        return pairs
-
-    bull_pairs = bull_div_pairs(swing_lows)
-    bear_pairs = bear_div_pairs(swing_highs)
-
-    # 最近一次背離的第二腳要夠近（近 8 根內），才當成「現在」訊號
-    near = n - 8
-
-    if bull_pairs and bull_pairs[-1][1] >= near:
-        last = bull_pairs[-1]
-        # 二度：在 last 之前還有一次多頭背離，且時間上相連（同一段下跌）
-        is_double = False
-        if len(bull_pairs) >= 2:
-            prev = bull_pairs[-2]
-            # 前一次的第二腳 = 這一次的第一腳，或兩次第二腳相距不太遠
-            if prev[1] == last[0] or (last[1] - prev[1] <= 40):
-                is_double = True
-        tag = "二度多頭背離" if is_double else "一次多頭背離（底背離）"
-        strength = "較強參考（影片：第二次背離才是真正買點）" if is_double else "僅一次，偏觀察"
-        return {
-            "price": closes[-1],
-            "signal": f"{tag}：價新低RSI未新低（RSI6={rsi[-1]:.1f}）",
-            "vol": "",
-            "strategy": "RSI背離",
-            "direction": "買進（觀察反轉）",
+            "signal": f"破底翻：跌破前低{prev_low:.2f}後站回",
+            "direction": "買進", "side": "long", "winrate": WINRATE["破底翻"],
             "entry": round(closes[-1] * 1.005, 2),
-            "stop": round(min(lows[last[1]] * 0.98, closes[-1] * 0.96), 2),
+            "stop": round(prev_low * 0.985, 2),
             "target": round(closes[-1] * 1.07, 2),
-            "how": f"{strength}。停損背離低點下。影片強調築底常見一次、現在也見二度。",
-            "side": "long",
-            "winrate": lookup_winrate("底背離：價格新低RSI抬高"),
-        }
-
-    if bear_pairs and bear_pairs[-1][1] >= near:
-        last = bear_pairs[-1]
-        is_double = False
-        if len(bear_pairs) >= 2:
-            prev = bear_pairs[-2]
-            if prev[1] == last[0] or (last[1] - prev[1] <= 40):
-                is_double = True
-        tag = "二度空頭背離" if is_double else "一次空頭背離（頂背離）"
-        strength = "較強參考（影片：第二次背離才是真正賣點）" if is_double else "僅一次，偏觀察"
-        return {
+            "how": "站回前低後買，停損前低下約 1.5%",
             "price": closes[-1],
-            "signal": f"{tag}：價新高RSI未新高（RSI6={rsi[-1]:.1f}）",
-            "vol": "",
-            "strategy": "RSI背離",
-            "direction": "賣出／減碼",
-            "entry": "-",
-            "stop": "-",
-            "target": round(closes[-1] * 0.95, 2),
-            "how": f"{strength}。持有者減碼；空手不追高。",
-            "side": "short",
-            "winrate": lookup_winrate("頂背離：價格新高RSI降低"),
         }
     return None
 
 
+# ---------- 買5：RSI 鈍化 ----------
 def analyze_rsi_passivation(hist):
     closes, vols = hist["closes"], hist["vols"]
     n = len(closes)
     if n < 40 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
-    rsi = calc_rsi(closes, CONFIG["RSI_PERIOD"])
-    days, level = CONFIG["RSI_PASSIVATION_DAYS"], CONFIG["RSI_PASSIVATION_LEVEL"]
+    rsi = calc_rsi(closes, 14)
+    days, level = 5, 70
     if any(r is None or r < level for r in rsi[-days:]):
         return None
     ma5 = calc_ma_list(closes, 5)
@@ -682,177 +339,180 @@ def analyze_rsi_passivation(hist):
     ma20 = calc_ma_list(closes, 20)
     if ma20[-1] is not None and closes[-1] < ma20[-1]:
         return None
-    sig = f"RSI鈍化：連續{days}日≥{level}（{rsi[-1]:.1f}）+站上五日線"
     return {
-        "price": closes[-1], "signal": sig, "vol": "",
-        "strategy": "RSI鈍化", "direction": "買進（順勢）",
+        "signal": f"RSI鈍化：連續{days}日≥{level}（{rsi[-1]:.1f}）+站上五日線",
+        "direction": "買進（順勢）", "side": "long", "winrate": WINRATE["RSI鈍化"],
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(ma5[-1] * 0.99, closes[-1] * 0.97), 2),
         "target": round(closes[-1] * 1.06, 2),
-        "how": "跌破五日線或RSI<70出場，停損約3%", "side": "long",
-        "winrate": lookup_winrate("RSI鈍化：連續5日≥70+站上五日線"),
+        "how": "跌破五日線或 RSI<70 出場，停損約 3%",
+        "price": closes[-1],
     }
 
 
-def calc_kd(highs, lows, closes, n=9):
-    N = len(closes)
-    K = [None] * N
-    D = [None] * N
-    k = d = 50.0
-    for i in range(N):
-        if i + 1 < n:
-            continue
-        hh = max(highs[i - n + 1:i + 1])
-        ll = min(lows[i - n + 1:i + 1])
-        rsv = 50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100
-        k = k * 2 / 3 + rsv / 3
-        d = d * 2 / 3 + k / 3
-        K[i], D[i] = k, d
-    return K, D
+# ---------- RSI 背離：週期 5 與 10（一次／二度） ----------
+def _swing_indices(values, order=3, find_min=True):
+    out = []
+    n = len(values)
+    for i in range(order, n - order):
+        window = values[i - order:i + order + 1]
+        if find_min:
+            if values[i] == min(window):
+                out.append(i)
+        else:
+            if values[i] == max(window):
+                out.append(i)
+    return out
 
 
-def analyze_kd_rsi(hist):
-    """
-    第9策略（依你指定規則）
-    - KD(9)：K≥50 作多區，K≤50 作空區（用 K 線）
-    - RSI(10)：≥60 作多區，≤40 作空區
-    - 共振＝兩個都進同方向區間；不要求同一天同時形成
-    - 訊號觸發＝今天「至少有一個」剛進入該區間（變化），另一個可以早就在裡面
-    """
-    closes, highs, lows, vols = hist["closes"], hist["highs"], hist["lows"], hist["vols"]
+def _div_pairs_for_period(closes, lows, highs, rsi, look, bull=True):
+    """回傳 [(a,b), ...] 背離對；bull=True 多頭（底），False 空頭（頂）。"""
     n = len(closes)
-    if n < 40 or vols[-1] < CONFIG["MIN_VOLUME"]:
+    base = n - look
+    if bull:
+        swings = [base + i for i in _swing_indices(lows[-look:], order=3, find_min=True)]
+        pairs = []
+        for a, b in zip(swings, swings[1:]):
+            if lows[b] < lows[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] > rsi[a]:
+                pairs.append((a, b))
+        return pairs
+    swings = [base + i for i in _swing_indices(highs[-look:], order=3, find_min=False)]
+    pairs = []
+    for a, b in zip(swings, swings[1:]):
+        if highs[b] > highs[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] < rsi[a]:
+            pairs.append((a, b))
+    return pairs
+
+
+def _best_div(closes, lows, highs, bull=True):
+    """
+    用 RSI(5)、RSI(10) 檢查背離。
+    回傳 dict: is_double, periods(list), rsi_txt, last_idx 或 None
+    優先：二度 > 一次；若兩邊都有則都標上。
+    """
+    n = len(closes)
+    look = min(80, n - 1)
+    near = n - 8
+    found_double = []  # (period, last_pair, rsi_last)
+    found_single = []
+    for period in (5, 10):
+        rsi = calc_rsi(closes, period)
+        if any(x is None for x in rsi[-50:]):
+            continue
+        pairs = _div_pairs_for_period(closes, lows, highs, rsi, look, bull=bull)
+        if not pairs or pairs[-1][1] < near:
+            continue
+        last = pairs[-1]
+        is_double = False
+        if len(pairs) >= 2:
+            prev = pairs[-2]
+            if prev[1] == last[0] or (last[1] - prev[1] <= 40):
+                is_double = True
+        item = (period, last, rsi[-1])
+        if is_double:
+            found_double.append(item)
+        else:
+            found_single.append(item)
+    chosen = found_double if found_double else found_single
+    if not chosen:
         return None
-    K, D = calc_kd(highs, lows, closes, 9)
-    rsi = calc_rsi(closes, 10)
-    if K[-1] is None or K[-2] is None or rsi[-1] is None or rsi[-2] is None:
-        return None
-
-    # 當前狀態
-    kd_long = K[-1] > 50
-    kd_short = K[-1] < 50
-    rsi_long = rsi[-1] >= 60
-    rsi_short = rsi[-1] <= 40
-
-    # 今天「剛形成」：昨非今是
-    kd_long_new = (K[-2] <= 50) and (K[-1] > 50)
-    kd_short_new = (K[-2] >= 50) and (K[-1] < 50)
-    rsi_long_new = (rsi[-2] < 60) and (rsi[-1] >= 60)
-    rsi_short_new = (rsi[-2] > 40) and (rsi[-1] <= 40)
-
-    # 共振買：兩邊都在多；且今天至少一個剛進入
-    buy = kd_long and rsi_long and (kd_long_new or rsi_long_new)
-    # 共振賣：兩邊都在空；且今天至少一個剛進入
-    sell = kd_short and rsi_short and (kd_short_new or rsi_short_new)
-
-    if not buy and not sell:
-        return None
-
-    px = closes[-1]
-    k_txt = f"K={K[-1]:.1f}"
-    r_txt = f"RSI10={rsi[-1]:.1f}"
-
-    if buy and not sell:
-        who = []
-        if kd_long_new:
-            who.append("KD今日進多")
-        if rsi_long_new:
-            who.append("RSI今日進多")
-        if not kd_long_new:
-            who.append("KD早已在多")
-        if not rsi_long_new:
-            who.append("RSI早已在多")
-        direction, side = "買進", "long"
-        sig = f"KD+RSI共振買：{k_txt}>50 且 {r_txt}≥60（{'；'.join(who)}）"
-        entry, stop, target = round(px * 1.005, 2), round(px * 0.97, 2), round(px * 1.06, 2)
-        how = "不要求同一天同時形成：一邊早已到位、另一邊今天到位即出訊號。停損約3%。"
-        wr = "—"
-    elif sell and not buy:
-        who = []
-        if kd_short_new:
-            who.append("KD今日進空")
-        if rsi_short_new:
-            who.append("RSI今日進空")
-        if not kd_short_new:
-            who.append("KD早已在空")
-        if not rsi_short_new:
-            who.append("RSI早已在空")
-        direction, side = "賣出／減碼", "short"
-        sig = f"KD+RSI共振賣：{k_txt}<50 且 {r_txt}≤40（{'；'.join(who)}）"
-        entry, stop, target = "-", round(px * 1.03, 2), round(px * 0.95, 2)
-        how = "兩邊都進空方區間，且今天至少一個剛轉空才發訊。持有者考慮減碼。"
-        wr = "—"
-    else:
-        direction, side = "衝突（買賣都出現）", "long"
-        sig = "KD+RSI 買賣共振衝突，先不要下單"
-        entry, stop, target = "-", "-", "-"
-        how = "多空條件同時成立，訊號互相打架。"
-        wr = "—"
-
+    is_double = bool(found_double)
+    periods = [p for p, _, _ in chosen]
+    rsi_txt = "、".join(f"RSI{p}={rv:.1f}" for p, _, rv in chosen)
+    last_idx = max(last for _, last, _ in chosen)[1]
     return {
-        "price": px, "signal": sig, "vol": "",
-        "strategy": "KD+RSI共振", "direction": direction,
-        "entry": entry, "stop": stop, "target": target,
-        "how": how, "side": side, "winrate": wr,
+        "is_double": is_double,
+        "periods": periods,
+        "rsi_txt": rsi_txt,
+        "last_idx": last_idx,
     }
+
+
+def analyze_bull_divergence(hist):
+    """買：一次／二度多頭背離（RSI5、RSI10）"""
+    closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
+    n = len(closes)
+    if n < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    info = _best_div(closes, lows, highs, bull=True)
+    if not info:
+        return None
+    tag = "二度多頭背離" if info["is_double"] else "一次多頭背離"
+    return {
+        "signal": f"{tag}：價新低RSI未新低（{info['rsi_txt']}）",
+        "direction": "買進（觀察反轉）", "side": "long", "winrate": WINRATE["多頭背離"],
+        "entry": round(closes[-1] * 1.005, 2),
+        "stop": round(min(lows[info["last_idx"]] * 0.98, closes[-1] * 0.96), 2),
+        "target": round(closes[-1] * 1.07, 2),
+        "how": "二度通常較具參考。停損背離低點下。RSI 用 5 與 10 檢查。",
+        "price": closes[-1],
+    }
+
+
+def analyze_top_divergence(hist):
+    """賣：僅保留頂背離（RSI5、RSI10，含二度）"""
+    closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
+    n = len(closes)
+    if n < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    info = _best_div(closes, lows, highs, bull=False)
+    if not info:
+        return None
+    tag = "二度空頭背離" if info["is_double"] else "一次空頭背離（頂背離）"
+    return {
+        "signal": f"{tag}：價新高RSI未新高（{info['rsi_txt']}）",
+        "direction": "賣出／減碼", "side": "short", "winrate": WINRATE["頂背離"],
+        "entry": "-", "stop": "-", "target": round(closes[-1] * 0.95, 2),
+        "how": "持有者減碼；空手不追高。RSI 用 5 與 10 檢查。",
+        "price": closes[-1],
+    }
+
+
+SIGNAL_KEYS = [
+    "三白兵", "破底翻", "黏合晨星", "爆量三白兵", "RSI鈍化", "多頭背離", "頂背離"
+]
 
 
 def run_full_scan():
-    results = {s: [] for s in [
-        "均線轉折", "周線多頭", "金包銀", "RSI抄底",
-        "假突破破底翻", "一夜持股", "RSI背離", "RSI鈍化", "KD+RSI共振"
-    ]}
-    ma_stocks = load_ma_stocks()
+    results = {k: [] for k in SIGNAL_KEYS}
 
-    def process_ma(item):
-        hist = get_yahoo_history(item["sid"])
-        if hist is None:
-            return None
-        r = analyze_ma_signals(hist, item["short_n"], item["long_n"])
-        if r:
-            r["lots"] = int(hist["vols"][-1] // 1000)
-            r.update({"sid": item["sid"], "name": item["name"], "sheet": item["sheet"], "hist": hist})
-            return r
-        return None
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=CONFIG["BATCH_WORKERS"]) as ex:
-        for f in concurrent.futures.as_completed([ex.submit(process_ma, i) for i in ma_stocks]):
-            try:
-                res = f.result()
-                if res:
-                    results["均線轉折"].append(res)
-            except Exception:
-                pass
+    def add(key, item, r):
+        if not r:
+            return
+        results[key].append(_pack(
+            item["sid"], item["name"], item["sheet"], item["hist"],
+            r["price"], r["signal"], r["direction"], r["entry"], r["stop"], r["target"],
+            r["how"], r["side"], r["winrate"]
+        ))
 
     main_stocks = load_main_stocks()
 
-    def process_other(item):
+    def process_main(item):
         hist = get_yahoo_history(item["sid"])
         if hist is None:
             return []
-        local = []
-        for func, key in [
-            (analyze_weekly_bull, "周線多頭"),
-            (analyze_jinbaoyin, "金包銀"),
-            (analyze_rsi_oversold, "RSI抄底"),
-            (analyze_fake_break, "假突破破底翻"),
-            (analyze_overnight, "一夜持股"),
-            (analyze_rsi_divergence, "RSI背離"),
-            (analyze_rsi_passivation, "RSI鈍化"),
-            (analyze_kd_rsi, "KD+RSI共振"),
-        ]:
-            r = func(hist)
+        item = {**item, "hist": hist}
+        found = []
+        mapping = [
+            ("三白兵", lambda h: analyze_bull_sanbaibing(h, False)),
+            ("爆量三白兵", lambda h: analyze_bull_sanbaibing(h, True)),
+            ("黏合晨星", analyze_bull_sticky_morning),
+            ("破底翻", analyze_break_bottom_flip),
+            ("RSI鈍化", analyze_rsi_passivation),
+            ("多頭背離", analyze_bull_divergence),
+            ("頂背離", analyze_top_divergence),
+        ]
+        for key, fn in mapping:
+            r = fn(hist)
             if r:
-                r["lots"] = int(hist["vols"][-1] // 1000)
-                r.update({"sid": item["sid"], "name": item["name"], "sheet": item["sheet"], "hist": hist})
-                local.append((key, r))
-        return local
+                found.append((key, item, r))
+        return found
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=CONFIG["BATCH_WORKERS"]) as ex:
-        for f in concurrent.futures.as_completed([ex.submit(process_other, i) for i in main_stocks]):
+        for f in concurrent.futures.as_completed([ex.submit(process_main, i) for i in main_stocks]):
             try:
-                for key, res in f.result():
-                    results[key].append(res)
+                for key, item, r in f.result():
+                    add(key, item, r)
             except Exception:
                 pass
     return results
@@ -860,7 +520,7 @@ def run_full_scan():
 
 def build_conflict_table(results):
     by_sid = {}
-    for strategy, items in results.items():
+    for key, items in results.items():
         for d in items:
             by_sid.setdefault(d["sid"], []).append(d)
     rows = []
@@ -873,9 +533,8 @@ def build_conflict_table(results):
             "代號": sid,
             "名稱": lst[0]["name"],
             "策略數": len(lst),
-            "衝突": "⚠️是" if conflict else "否",
-            "方向": "｜".join(f"{x['strategy']}:{x.get('direction','')}" for x in lst),
-            "歷史勝率": "｜".join(f"{x['strategy']}:{x.get('winrate','—')}" for x in lst),
+            "衝突": "是" if conflict else "否",
+            "方向": "｜".join(f"{x['signal'].split('｜')[0]}:{x.get('direction','')}" for x in lst),
             "現價": lst[0]["price"],
         })
     if not rows:
@@ -901,7 +560,7 @@ def make_chart(hist, title):
     ma20 = calc_ma_list(hist["closes"], 20)[-60:]
     fig.add_trace(go.Scatter(x=x, y=ma5, mode="lines", name="MA5", line=dict(color="#FFA500", width=1.5)), row=1, col=1)
     fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="MA20", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
-    colors = ['#FF3333' if closes[i] >= opens[i] else '#00A600' for i in range(len(closes))]
+    colors = ["#FF3333" if closes[i] >= opens[i] else "#00A600" for i in range(len(closes))]
     fig.add_trace(go.Bar(x=x, y=vols, marker_color=colors, name="量"), row=2, col=1)
     fig.update_layout(title=title, xaxis_rangeslider_visible=False,
                       margin=dict(l=8, r=8, t=36, b=8), height=360, showlegend=True,
@@ -920,36 +579,26 @@ def direction_html(direction: str) -> str:
     return d
 
 
-def render_strategy_tab(data_list, strategy_name):
-    summary = STRATEGY_SUMMARY.get(strategy_name, "")
-    if summary:
-        st.markdown(f"**歷史隔日勝率參考：** {summary}")
-        st.caption("※ 來自過去約3個月回測寫死數值，非即時重算；樣本少時不穩。")
-
+def render_signal_tab(data_list, title, note=""):
+    st.markdown(f"**{title}**")
+    if note:
+        st.caption(note)
     if not data_list:
-        st.info(f"目前沒有符合【{strategy_name}】的個股。")
+        st.info("目前沒有符合的個股。")
         return
-
     st.markdown(f"**共 {len(data_list)} 檔**")
-
-    # 用 HTML 表格方便紅綠色 + 換行
     rows_html = []
     for d in data_list:
         dir_h = direction_html(d.get("direction", ""))
-        wr = d.get("winrate") or "—"
-        sig = d["signal"]
-        if wr not in ("", "—") and "勝率" not in sig:
-            sig = f"{sig}｜勝率{wr}"
         pxcell = f"買{d.get('entry', '-')} 停{d.get('stop', '-')} 目{d.get('target', '-')}"
-        lots = d.get("lots", 0)
         rows_html.append(
             f"<tr>"
             f"<td>{d['sid']}</td>"
             f"<td>{d['name']}</td>"
             f"<td>{d['price']:.2f}</td>"
             f"<td>{dir_h}</td>"
-            f"<td>{sig}</td>"
-            f"<td>{lots}張</td>"
+            f"<td>{d['signal']}</td>"
+            f"<td>{d.get('lots', 0)}張</td>"
             f"<td>{pxcell}</td>"
             f"</tr>"
         )
@@ -966,168 +615,101 @@ def render_strategy_tab(data_list, strategy_name):
       <th style="padding:8px; text-align:left;">買賣參考</th>
     </tr>
     </thead>
-    <tbody>
-    {''.join(rows_html)}
-    </tbody>
+    <tbody>{''.join(rows_html)}</tbody>
     </table>
     """
     st.markdown(table, unsafe_allow_html=True)
-
     for idx, item in enumerate(data_list):
-        dir_h = direction_html(item.get("direction", ""))
-        with st.expander(f"{item['sid']} {item['name']}｜勝率 {item.get('winrate','—')}", expanded=False):
-            st.markdown(f"**方向：** {dir_h}", unsafe_allow_html=True)
+        with st.expander(f"{item['sid']} {item['name']}｜{item.get('winrate','')}", expanded=False):
+            st.markdown(f"**方向：** {direction_html(item.get('direction',''))}", unsafe_allow_html=True)
             st.markdown(f"**訊號：** {item['signal']}")
             st.markdown(f"**操作：** {item.get('how', '')}")
             st.markdown(
                 f"現價 **{item['price']:.2f}**｜買進 **{item.get('entry','-')}**｜"
-                f"停損 **{item.get('stop','-')}**｜目標 **{item.get('target','-')}**"
+                f"停損 **{item.get('stop','-')}**｜目標 **{item.get('target','-')}**｜"
+                f"量 **{item.get('lots',0)}張**"
             )
             fig = make_chart(item["hist"], f"{item['sid']} {item['name']}")
-            st.plotly_chart(fig, use_container_width=True, key=f"c_{strategy_name}_{idx}_{item['sid']}")
+            st.plotly_chart(fig, use_container_width=True, key=f"c_{title}_{idx}_{item['sid']}")
 
 
-# ==============================================================================
-# 主介面
-# ==============================================================================
-st.title("台股九策略 v7")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜勝率寫在訊號｜量能為張數｜買賣停損目標同一格")
+# ---------- UI ----------
+st.title("台股精選訊號 v8.1")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜買6（含多頭背離）｜賣只留頂背離｜RSI背離用5與10")
 
-st.warning("勝率是隔日收盤樣本，未扣手續費與稅。KD+RSI 半年數字只掃主要清單前40檔，賣出高勝率樣本很少，不要當成保證。")
+st.warning("勝率為歷史隔日收盤樣本，未扣成本，不構成投資建議。跌破長均已移除。")
+
+with st.expander("保留清單", expanded=True):
+    st.markdown("""
+| 方向 | 訊號 | 歷史勝率 |
+|------|------|----------|
+| 買 | 均線多頭排列 + 三白兵 | **48.8%** |
+| 買 | 破底翻 | **48.2%** |
+| 買 | 均線多頭排列 + 黏合後打開 + 晨星 | **46.3%** |
+| 買 | 均線多頭排列 + 爆量 + 三白兵 | **45.7%** |
+| 買 | RSI 鈍化 | **45.6%** |
+| 買 | 一次／二度多頭背離（RSI5、RSI10） | **43.4%** |
+| 賣 | RSI 頂背離（RSI5、RSI10，含二度） | **54.4%** |
+""")
 
 col1, col2 = st.columns(2)
 with col1:
-    do_scan = st.button("🔄 同步掃描", use_container_width=True)
+    do_scan = st.button("同步掃描", use_container_width=True)
 with col2:
-    if st.button("🚀 強制刷新", type="primary", use_container_width=True):
+    if st.button("強制刷新", type="primary", use_container_width=True):
         st.cache_data.clear()
         SYMBOL_CACHE.clear()
         st.rerun()
 
-if do_scan or "scan_results" not in st.session_state:
+if do_scan or "scan_results_v8" not in st.session_state:
     with st.spinner("掃描中..."):
-        st.session_state["scan_results"] = run_full_scan()
-        st.session_state["scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state["scan_results_v8"] = run_full_scan()
     if do_scan:
         st.success("掃描完成")
 
-results = st.session_state.get("scan_results", {})
-
-# 勝率速覽
-with st.expander("📋 歷史勝率速覽（寫死數值）", expanded=False):
-    wr_rows = [
-        {"訊號": k, "樣本數": v["n"], "勝率%": v["rate"], "平均報酬%": v["avg"]}
-        for k, v in HARDCODED_WINRATES.items()
-    ]
-    st.dataframe(pd.DataFrame(wr_rows), use_container_width=True, hide_index=True)
+results = st.session_state.get("scan_results_v8", {})
 
 tabs = st.tabs([
-    "KD參數比較",
     "衝突彙整",
-    "均線轉折", "周線多頭", "金包銀", "RSI抄底",
-    "假突破破底翻", "一夜持股", "RSI背離", "RSI鈍化", "KD+RSI"
+    "三白兵 48.8%",
+    "破底翻 48.2%",
+    "黏合晨星 46.3%",
+    "爆量三白兵 45.7%",
+    "RSI鈍化 45.6%",
+    "多頭背離 43.4%",
+    "頂背離 54.4%",
 ])
 
-KD_SWEEP = [
-    ("6", "20/80", "當天", "買進", 26, 50.0),
-    ("6", "20/80", "前後1天", "買進", 38, 47.4),
-    ("6", "20/80", "前後2天", "買進", 41, 48.8),
-    ("6", "30/70", "當天", "買進", 89, 40.4),
-    ("6", "30/70", "前後1天", "買進", 125, 40.0),
-    ("6", "30/70", "前後2天", "買進", 136, 42.6),
-    ("10", "20/80", "當天", "買進", 12, 50.0),
-    ("10", "20/80", "前後1天", "買進", 19, 36.8),
-    ("10", "20/80", "前後2天", "買進", 21, 42.9),
-    ("10", "30/70", "當天", "買進", 53, 43.4),
-    ("10", "30/70", "前後1天", "買進", 79, 40.5),
-    ("10", "30/70", "前後2天", "買進", 83, 41.0),
-    ("12", "20/80", "當天", "買進", 7, 42.9),
-    ("12", "20/80", "前後1天", "買進", 12, 41.7),
-    ("12", "20/80", "前後2天", "買進", 13, 46.2),
-    ("12", "30/70", "當天", "買進", 43, 48.8),
-    ("12", "30/70", "前後1天", "買進", 63, 42.9),
-    ("12", "30/70", "前後2天", "買進", 62, 43.5),
-    ("14", "20/80", "當天", "買進", 4, 25.0),
-    ("14", "20/80", "前後1天", "買進", 8, 37.5),
-    ("14", "20/80", "前後2天", "買進", 9, 44.4),
-    ("14", "30/70", "當天", "買進", 35, 42.9),
-    ("14", "30/70", "前後1天", "買進", 51, 41.2),
-    ("14", "30/70", "前後2天", "買進", 50, 40.0),
-    ("24", "20/80", "當天", "買進", 0, None),
-    ("24", "30/70", "當天", "買進", 12, 41.7),
-    ("24", "30/70", "前後1天", "買進", 18, 38.9),
-    ("24", "30/70", "前後2天", "買進", 19, 42.1),
-    ("6", "20/80", "當天", "賣出", 6, 50.0),
-    ("6", "30/70", "當天", "賣出", 33, 51.5),
-    ("6", "30/70", "前後1天", "賣出", 50, 52.0),
-    ("6", "30/70", "前後2天", "賣出", 53, 52.8),
-    ("10", "20/80", "當天", "賣出", 4, 50.0),
-    ("10", "30/70", "當天", "賣出", 20, 55.0),
-    ("10", "30/70", "前後1天", "賣出", 32, 59.4),
-    ("10", "30/70", "前後2天", "賣出", 34, 58.8),
-    ("12", "20/80", "當天", "賣出", 3, 66.7),
-    ("12", "30/70", "當天", "賣出", 19, 57.9),
-    ("12", "30/70", "前後1天", "賣出", 25, 60.0),
-    ("12", "30/70", "前後2天", "賣出", 28, 60.7),
-    ("14", "20/80", "當天", "賣出", 2, 100.0),
-    ("14", "30/70", "當天", "賣出", 13, 61.5),
-    ("14", "30/70", "前後1天", "賣出", 18, 66.7),
-    ("14", "30/70", "前後2天", "賣出", 22, 63.6),
-    ("24", "20/80", "當天", "賣出", 0, None),
-    ("24", "30/70", "當天", "賣出", 8, 50.0),
-    ("24", "30/70", "前後1天", "賣出", 9, 55.6),
-    ("24", "30/70", "前後2天", "賣出", 9, 55.6),
-]
-
 with tabs[0]:
-    st.markdown("""
-### 第 9 策略現行規則（已依你指定修改）
-
-| 項目 | 設定 |
-|------|------|
-| KD | 週期 **9**，K **>50 作多**、**<50 作空** |
-| RSI | 週期 **10**，**≥60 作多**、**≤40 作空** |
-| 共振 | 兩個指標都進**同方向**區間 |
-| 觸發 | **不要求同一天同時形成**。一邊可以早就在區間內，另一邊**今天剛進入**，訊號才出 |
-
-### RSI 背離（已加入二度）
-
-- **一次多頭／空頭背離**：價格新低（高）但 RSI 未新低（高）
-- **二度背離**：同一段趨勢內連續出現兩次 → 訊號會標「二度…」（影片：第二次較具參考）
-- 計算用 **RSI(6)**（對齊今周刊圖例）
-
-下方表格是**舊版**「低檔交叉＋窗口」半年掃描，僅供對照，**不是**現行第 9 策略規則。
-""")
-    sdf = pd.DataFrame(KD_SWEEP, columns=["RSI", "門檻", "窗口", "方向", "樣本", "勝率%"])
-    st.dataframe(sdf.sort_values(["方向", "勝率%"], ascending=[True, False]), use_container_width=True, hide_index=True)
+    st.markdown("同一檔出現多個訊號時集中顯示。買賣相反會標衝突。")
+    cdf = build_conflict_table(results)
+    if cdf.empty:
+        st.info("目前沒有跨訊號重疊個股。")
+    else:
+        st.dataframe(cdf, use_container_width=True, hide_index=True)
 
 with tabs[1]:
-    st.markdown("**同一檔出現在多個策略時集中顯示。** 買賣相反會標衝突。")
-    conflict_df = build_conflict_table(results)
-    if conflict_df.empty:
-        st.info("目前沒有跨策略重疊個股。")
-    else:
-        # HTML 顯示方向顏色
-        st.dataframe(conflict_df, use_container_width=True, hide_index=True)
-
+    render_signal_tab(results.get("三白兵", []), "多頭排列 + 三白兵", "歷史勝率 48.8%（樣本偏少）")
 with tabs[2]:
-    render_strategy_tab(results.get("均線轉折", []), "均線轉折")
+    render_signal_tab(results.get("破底翻", []), "破底翻", "歷史勝率 48.2%")
 with tabs[3]:
-    render_strategy_tab(results.get("周線多頭", []), "周線多頭")
+    render_signal_tab(results.get("黏合晨星", []), "多頭排列 + 黏合打開 + 晨星", "歷史勝率 46.3%（樣本偏少）")
 with tabs[4]:
-    render_strategy_tab(results.get("金包銀", []), "金包銀")
+    render_signal_tab(results.get("爆量三白兵", []), "多頭排列 + 爆量 + 三白兵", "歷史勝率 45.7%（樣本偏少）")
 with tabs[5]:
-    render_strategy_tab(results.get("RSI抄底", []), "RSI抄底")
+    render_signal_tab(results.get("RSI鈍化", []), "RSI 鈍化", "歷史勝率 45.6%")
 with tabs[6]:
-    render_strategy_tab(results.get("假突破破底翻", []), "假突破破底翻")
+    render_signal_tab(
+        results.get("多頭背離", []),
+        "一次／二度多頭背離",
+        "RSI(5) 與 RSI(10) 檢查｜訊號會標一次或二度｜歷史底背離約 43.4%",
+    )
 with tabs[7]:
-    render_strategy_tab(results.get("一夜持股", []), "一夜持股")
-with tabs[8]:
-    render_strategy_tab(results.get("RSI背離", []), "RSI背離")
-with tabs[9]:
-    render_strategy_tab(results.get("RSI鈍化", []), "RSI鈍化")
-with tabs[10]:
-    render_strategy_tab(results.get("KD+RSI共振", []), "KD+RSI共振")
+    render_signal_tab(
+        results.get("頂背離", []),
+        "RSI 頂背離（唯一賣出）",
+        "RSI(5) 與 RSI(10) 檢查｜含二度｜歷史勝率 54.4%",
+    )
 
 st.markdown("---")
 st.caption("僅供學習監控。投資有風險，請獨立判斷並自負盈虧。")
