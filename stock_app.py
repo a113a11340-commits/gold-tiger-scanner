@@ -90,9 +90,9 @@ STRATEGY_SUMMARY = {
     "RSI抄底": "本次回測樣本不足未列出",
     "假突破破底翻": "破底翻約48%｜真突破約43%",
     "一夜持股": "約29%（樣本僅28，極不穩）",
-    "RSI背離": "頂背離約54%｜底背離約43%",
+    "RSI背離": "一次／二度背離皆會標註｜歷史頂約54%｜底約43%（舊規則樣本）",
     "RSI鈍化": "約46%",
-    "KD+RSI共振": "買進用RSI12、30/70、當天：48.8%；賣出用RSI14、30/70、前後1天：66.7%（賣出樣本少）",
+    "KD+RSI共振": "KD9＋RSI10｜K>50且RSI≥60買｜K<50且RSI≤40賣｜一邊早到位、另一邊今日到位即出訊",
 }
 
 
@@ -556,46 +556,114 @@ def analyze_overnight(hist):
     }
 
 
+def _swing_indices(values, order=3, find_min=True):
+    """找局部高低點索引（order=左右各看幾根）。"""
+    out = []
+    n = len(values)
+    for i in range(order, n - order):
+        window = values[i - order:i + order + 1]
+        if find_min:
+            if values[i] == min(window) and values[i] == min(values[max(0, i - order):i + 1]):
+                out.append(i)
+        else:
+            if values[i] == max(window) and values[i] == max(values[max(0, i - order):i + 1]):
+                out.append(i)
+    return out
+
+
 def analyze_rsi_divergence(hist):
+    """
+    RSI 背離（對齊今周刊口訣）
+    - 多頭／底背離：價格創新低、RSI 未創低 → 買點浮現
+    - 空頭／頂背離：價格創新高、RSI 未創高 → 賣點浮現
+    - 二度背離：同一段趨勢內出現兩次背離，通常較具參考性
+    指標用 RSI(6)（影片圖例為 6 日 RSI）。
+    """
     closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
     n = len(closes)
-    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
+    if n < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
-    rsi = calc_rsi(closes, CONFIG["RSI_PERIOD"])
-    if any(x is None for x in rsi[-CONFIG["RSI_DIVERGENCE_LOOKBACK"]:]):
+    # 影片範例用 6 日 RSI
+    rsi = calc_rsi(closes, 6)
+    if any(x is None for x in rsi[-50:]):
         return None
-    recent_low_idx = n - 1 - int(np.argmin(lows[-10:]))
-    prev_start = max(0, recent_low_idx - 25)
-    prev_window = lows[prev_start:recent_low_idx - 3]
-    if len(prev_window) >= 5:
-        prev_low_idx = prev_start + int(np.argmin(prev_window))
-        if (closes[recent_low_idx] < closes[prev_low_idx] and
-                rsi[recent_low_idx] > rsi[prev_low_idx] and rsi[recent_low_idx] < 40):
-            return {
-                "price": closes[-1],
-                "signal": f"底背離：價格新低RSI抬高（RSI={rsi[-1]:.1f}）", "vol": "",
-                "strategy": "RSI背離", "direction": "買進（觀察反轉）",
-                "entry": round(closes[-1] * 1.005, 2),
-                "stop": round(min(lows[recent_low_idx] * 0.98, closes[-1] * 0.96), 2),
-                "target": round(closes[-1] * 1.07, 2),
-                "how": "等站上近期小高點再買，停損背離低點下", "side": "long",
-                "winrate": lookup_winrate("底背離：價格新低RSI抬高"),
-            }
-    recent_high_idx = n - 1 - int(np.argmax(highs[-10:]))
-    prev_h_start = max(0, recent_high_idx - 25)
-    prev_h_window = highs[prev_h_start:recent_high_idx - 3]
-    if len(prev_h_window) >= 5:
-        prev_high_idx = prev_h_start + int(np.argmax(prev_h_window))
-        if (closes[recent_high_idx] > closes[prev_high_idx] and
-                rsi[recent_high_idx] < rsi[prev_high_idx] and rsi[recent_high_idx] > 60):
-            return {
-                "price": closes[-1],
-                "signal": f"頂背離：價格新高RSI降低（RSI={rsi[-1]:.1f}）", "vol": "",
-                "strategy": "RSI背離", "direction": "賣出／減碼",
-                "entry": "-", "stop": "-", "target": round(closes[-1] * 0.95, 2),
-                "how": "持有者減碼；空手不追高", "side": "short",
-                "winrate": lookup_winrate("頂背離：價格新高RSI降低"),
-            }
+
+    look = min(80, n - 1)
+    swing_lows = _swing_indices(lows[-look:], order=3, find_min=True)
+    swing_highs = _swing_indices(highs[-look:], order=3, find_min=False)
+    # 轉成絕對索引
+    base = n - look
+    swing_lows = [base + i for i in swing_lows]
+    swing_highs = [base + i for i in swing_highs]
+
+    def bull_div_pairs(idxs):
+        pairs = []
+        for a, b in zip(idxs, idxs[1:]):
+            # 價格更低、RSI 更高 → 多頭背離
+            if lows[b] < lows[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] > rsi[a]:
+                pairs.append((a, b))
+        return pairs
+
+    def bear_div_pairs(idxs):
+        pairs = []
+        for a, b in zip(idxs, idxs[1:]):
+            if highs[b] > highs[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] < rsi[a]:
+                pairs.append((a, b))
+        return pairs
+
+    bull_pairs = bull_div_pairs(swing_lows)
+    bear_pairs = bear_div_pairs(swing_highs)
+
+    # 最近一次背離的第二腳要夠近（近 8 根內），才當成「現在」訊號
+    near = n - 8
+
+    if bull_pairs and bull_pairs[-1][1] >= near:
+        last = bull_pairs[-1]
+        # 二度：在 last 之前還有一次多頭背離，且時間上相連（同一段下跌）
+        is_double = False
+        if len(bull_pairs) >= 2:
+            prev = bull_pairs[-2]
+            # 前一次的第二腳 = 這一次的第一腳，或兩次第二腳相距不太遠
+            if prev[1] == last[0] or (last[1] - prev[1] <= 40):
+                is_double = True
+        tag = "二度多頭背離" if is_double else "一次多頭背離（底背離）"
+        strength = "較強參考（影片：第二次背離才是真正買點）" if is_double else "僅一次，偏觀察"
+        return {
+            "price": closes[-1],
+            "signal": f"{tag}：價新低RSI未新低（RSI6={rsi[-1]:.1f}）",
+            "vol": "",
+            "strategy": "RSI背離",
+            "direction": "買進（觀察反轉）",
+            "entry": round(closes[-1] * 1.005, 2),
+            "stop": round(min(lows[last[1]] * 0.98, closes[-1] * 0.96), 2),
+            "target": round(closes[-1] * 1.07, 2),
+            "how": f"{strength}。停損背離低點下。影片強調築底常見一次、現在也見二度。",
+            "side": "long",
+            "winrate": lookup_winrate("底背離：價格新低RSI抬高"),
+        }
+
+    if bear_pairs and bear_pairs[-1][1] >= near:
+        last = bear_pairs[-1]
+        is_double = False
+        if len(bear_pairs) >= 2:
+            prev = bear_pairs[-2]
+            if prev[1] == last[0] or (last[1] - prev[1] <= 40):
+                is_double = True
+        tag = "二度空頭背離" if is_double else "一次空頭背離（頂背離）"
+        strength = "較強參考（影片：第二次背離才是真正賣點）" if is_double else "僅一次，偏觀察"
+        return {
+            "price": closes[-1],
+            "signal": f"{tag}：價新高RSI未新高（RSI6={rsi[-1]:.1f}）",
+            "vol": "",
+            "strategy": "RSI背離",
+            "direction": "賣出／減碼",
+            "entry": "-",
+            "stop": "-",
+            "target": round(closes[-1] * 0.95, 2),
+            "how": f"{strength}。持有者減碼；空手不追高。",
+            "side": "short",
+            "winrate": lookup_winrate("頂背離：價格新高RSI降低"),
+        }
     return None
 
 
@@ -643,81 +711,84 @@ def calc_kd(highs, lows, closes, n=9):
     return K, D
 
 
-def _rsi_flags(rsi, low_th, high_th):
-    n = len(rsi)
-    rb = [False] * n
-    rs = [False] * n
-    for i in range(1, n):
-        if rsi[i] is None or rsi[i - 1] is None:
-            continue
-        if (rsi[i - 1] < low_th <= rsi[i]) or (rsi[i - 1] < low_th and rsi[i] > rsi[i - 1]):
-            rb[i] = True
-        if (rsi[i - 1] > high_th >= rsi[i]) or (rsi[i - 1] > high_th and rsi[i] < rsi[i - 1]):
-            rs[i] = True
-    return rb, rs
-
-
-def _kd_flags(K, D, low_th, high_th):
-    n = len(K)
-    kb = [False] * n
-    ks = [False] * n
-    for i in range(1, n):
-        if None in (K[i], K[i - 1], D[i], D[i - 1]):
-            continue
-        if K[i - 1] <= D[i - 1] and K[i] > D[i] and K[i] <= low_th and D[i] <= low_th:
-            kb[i] = True
-        if K[i - 1] >= D[i - 1] and K[i] < D[i] and K[i] >= high_th and D[i] >= high_th:
-            ks[i] = True
-    return kb, ks
-
-
-def _fresh_resonance(a, b, i, w):
-    lo = max(0, i - w)
-    if not any(a[lo:i + 1]) or not any(b[lo:i + 1]):
-        return False
-    if i == 0:
-        return True
-    plo = max(0, i - 1 - w)
-    return not (any(a[plo:i]) and any(b[plo:i]))
-
-
 def analyze_kd_rsi(hist):
-    """第9策略。買：RSI12、門檻30、當天。賣：RSI14、門檻70、前後1天。KD=9。"""
+    """
+    第9策略（依你指定規則）
+    - KD(9)：K≥50 作多區，K≤50 作空區（用 K 線）
+    - RSI(10)：≥60 作多區，≤40 作空區
+    - 共振＝兩個都進同方向區間；不要求同一天同時形成
+    - 訊號觸發＝今天「至少有一個」剛進入該區間（變化），另一個可以早就在裡面
+    """
     closes, highs, lows, vols = hist["closes"], hist["highs"], hist["lows"], hist["vols"]
     n = len(closes)
     if n < 40 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
     K, D = calc_kd(highs, lows, closes, 9)
-    i = n - 1
-    rsi12 = calc_rsi(closes, 12)
-    rsi14 = calc_rsi(closes, 14)
-    rb, _ = _rsi_flags(rsi12, 30, 70)
-    kb, _ = _kd_flags(K, D, 30, 70)
-    _, rs = _rsi_flags(rsi14, 30, 70)
-    _, ks = _kd_flags(K, D, 30, 70)
-    buy = _fresh_resonance(rb, kb, i, 0)
-    sell = _fresh_resonance(rs, ks, i, 1)
+    rsi = calc_rsi(closes, 10)
+    if K[-1] is None or K[-2] is None or rsi[-1] is None or rsi[-2] is None:
+        return None
+
+    # 當前狀態
+    kd_long = K[-1] > 50
+    kd_short = K[-1] < 50
+    rsi_long = rsi[-1] >= 60
+    rsi_short = rsi[-1] <= 40
+
+    # 今天「剛形成」：昨非今是
+    kd_long_new = (K[-2] <= 50) and (K[-1] > 50)
+    kd_short_new = (K[-2] >= 50) and (K[-1] < 50)
+    rsi_long_new = (rsi[-2] < 60) and (rsi[-1] >= 60)
+    rsi_short_new = (rsi[-2] > 40) and (rsi[-1] <= 40)
+
+    # 共振買：兩邊都在多；且今天至少一個剛進入
+    buy = kd_long and rsi_long and (kd_long_new or rsi_long_new)
+    # 共振賣：兩邊都在空；且今天至少一個剛進入
+    sell = kd_short and rsi_short and (kd_short_new or rsi_short_new)
+
     if not buy and not sell:
         return None
+
     px = closes[-1]
+    k_txt = f"K={K[-1]:.1f}"
+    r_txt = f"RSI10={rsi[-1]:.1f}"
+
     if buy and not sell:
+        who = []
+        if kd_long_new:
+            who.append("KD今日進多")
+        if rsi_long_new:
+            who.append("RSI今日進多")
+        if not kd_long_new:
+            who.append("KD早已在多")
+        if not rsi_long_new:
+            who.append("RSI早已在多")
         direction, side = "買進", "long"
-        sig = "KD+RSI共振買：RSI12上穿或低檔翻揚且K上穿D（皆≤30，當天）"
-        wr = "48.8%"
+        sig = f"KD+RSI共振買：{k_txt}>50 且 {r_txt}≥60（{'；'.join(who)}）"
         entry, stop, target = round(px * 1.005, 2), round(px * 0.97, 2), round(px * 1.06, 2)
-        how = "低檔共振隔日觀察。停損約3%。半年樣本43筆，只代表這批傳產股。"
+        how = "不要求同一天同時形成：一邊早已到位、另一邊今天到位即出訊號。停損約3%。"
+        wr = "—"
     elif sell and not buy:
+        who = []
+        if kd_short_new:
+            who.append("KD今日進空")
+        if rsi_short_new:
+            who.append("RSI今日進空")
+        if not kd_short_new:
+            who.append("KD早已在空")
+        if not rsi_short_new:
+            who.append("RSI早已在空")
         direction, side = "賣出／減碼", "short"
-        sig = "KD+RSI共振賣：RSI14下穿或高檔轉弱且K下穿D（皆≥70，前後1天）"
-        wr = "66.7%"
+        sig = f"KD+RSI共振賣：{k_txt}<50 且 {r_txt}≤40（{'；'.join(who)}）"
         entry, stop, target = "-", round(px * 1.03, 2), round(px * 0.95, 2)
-        how = "高檔共振考慮減碼。此組樣本只有18筆，勝率容易高估。"
+        how = "兩邊都進空方區間，且今天至少一個剛轉空才發訊。持有者考慮減碼。"
+        wr = "—"
     else:
         direction, side = "衝突（買賣都出現）", "long"
-        sig = "KD+RSI同日買賣共振衝突，先不要下單"
-        wr = "—"
+        sig = "KD+RSI 買賣共振衝突，先不要下單"
         entry, stop, target = "-", "-", "-"
-        how = "買與賣條件同時成立，訊號互相打架。"
+        how = "多空條件同時成立，訊號互相打架。"
+        wr = "—"
+
     return {
         "price": px, "signal": sig, "vol": "",
         "strategy": "KD+RSI共振", "direction": direction,
@@ -1010,15 +1081,22 @@ KD_SWEEP = [
 
 with tabs[0]:
     st.markdown("""
-**半年、隔日收盤。KD 固定 9。** 影片沒講 RSI 天數、20/80 或 30/70、也沒講必須同天還是前後幾天，所以全部都測。
+### 第 9 策略現行規則（已依你指定修改）
 
-目前第 9 策略採用：
-- **買進：RSI 12、門檻 30/70、當天共振，勝率 48.8%**（樣本 43，平均報酬 +0.40%）
-- **賣出：RSI 14、門檻 30/70、前後 1 天，勝率 66.7%**（樣本只有 18，不可當真）
+| 項目 | 設定 |
+|------|------|
+| KD | 週期 **9**，K **>50 作多**、**<50 作空** |
+| RSI | 週期 **10**，**≥60 作多**、**≤40 作空** |
+| 共振 | 兩個指標都進**同方向**區間 |
+| 觸發 | **不要求同一天同時形成**。一邊可以早就在區間內，另一邊**今天剛進入**，訊號才出 |
 
-買進若只看樣本較多：RSI 6、30/70、前後 2 天是 42.6%（樣本 136）。
-賣出若排除樣本少於 30：RSI 10、30/70、前後 1 天是 59.4%（樣本 32）。
-20/80 的 100% 只有 2 筆，不要用。
+### RSI 背離（已加入二度）
+
+- **一次多頭／空頭背離**：價格新低（高）但 RSI 未新低（高）
+- **二度背離**：同一段趨勢內連續出現兩次 → 訊號會標「二度…」（影片：第二次較具參考）
+- 計算用 **RSI(6)**（對齊今周刊圖例）
+
+下方表格是**舊版**「低檔交叉＋窗口」半年掃描，僅供對照，**不是**現行第 9 策略規則。
 """)
     sdf = pd.DataFrame(KD_SWEEP, columns=["RSI", "門檻", "窗口", "方向", "樣本", "勝率%"])
     st.dataframe(sdf.sort_values(["方向", "勝率%"], ascending=[True, False]), use_container_width=True, hide_index=True)
