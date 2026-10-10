@@ -1,24 +1,15 @@
 """
 ================================================================================
-台股八策略監控系統（Streamlit 完整版 v4）
+台股八策略監控系統（Streamlit 完整版 v5）
 ================================================================================
-【v4 新增】
-1. 「衝突／彙整」分頁：同一檔股票出現在多個策略時，集中顯示（買/賣對照）
-2. 「訊號日誌」：每次掃描將訊號附加記錄（含日期時間），不刪除歷史
-3. 「次日勝率」：用下一交易日收盤價回填結果，統計各策略勝率
-4. 勝率會顯示在各策略 Tab 與衝突分頁
+【v5 新增】
+1. 「歷史回測」分頁：過去約 3 個月各訊號「隔日收盤」勝率
+2. 手動按紐才執行回測（不會每次掃描自動跑）
+3. 共用掃描時已下載的 Yahoo 日線，不重複抓 API
 
-【重要限制 — 請先讀】
-- Streamlit Cloud「不會」在你沒開網頁時於 14:30 自動跑程式（會休眠）
-- 「即使不開網頁也要統計」→ 必須用 Google Apps Script 排程（見同目錄說明）
-- 本版在「有人開啟網頁／按掃描」時：寫入日誌、回填待結案訊號、顯示勝率
+【沿用】衝突／彙整、訊號日誌、次日勝率回填
 
-【Sheet】
-- 策略1 均線轉折：金虎南 Sheet
-- 策略2～8：主要清單 Sheet
-- 訊號日誌：寫入主要 Sheet 的「訊號日誌」分頁（若無則僅 session 暫存）
-
-風險：所有勝率為樣本內觀察，未經驗證，不構成投資建議。
+風險：勝率為樣本觀察，未經驗證，不構成投資建議。
 ================================================================================
 """
 
@@ -33,7 +24,7 @@ from datetime import datetime, timedelta
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-st.set_page_config(layout="wide", page_title="台股八策略監控系統 v4")
+st.set_page_config(layout="wide", page_title="台股八策略監控系統 v5")
 
 st.markdown("""
 <style>
@@ -546,26 +537,29 @@ def analyze_rsi_passivation(hist):
 # 掃描 + 日誌 + 勝率
 # ==============================================================================
 def run_full_scan():
+    """回傳 (results, hist_cache)。hist_cache 供歷史回測共用，避免重複下載。"""
     results = {s: [] for s in [
         "均線轉折", "周線多頭", "金包銀", "RSI抄底",
         "假突破破底翻", "一夜持股", "RSI背離", "RSI鈍化"
     ]}
+    hist_cache = {}
     ma_stocks = load_ma_stocks()
 
     def process_ma(item):
         hist = get_yahoo_history(item["sid"])
         if hist is None:
-            return None
+            return None, None
         r = analyze_ma_signals(hist, item["short_n"], item["long_n"])
         if r:
             r.update({"sid": item["sid"], "name": item["name"], "sheet": item["sheet"], "hist": hist})
-            return r
-        return None
+        return r, (item["sid"], hist)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=CONFIG["BATCH_WORKERS"]) as ex:
         for f in concurrent.futures.as_completed([ex.submit(process_ma, i) for i in ma_stocks]):
             try:
-                res = f.result()
+                res, pair = f.result()
+                if pair:
+                    hist_cache[pair[0]] = pair[1]
                 if res:
                     results["均線轉折"].append(res)
             except Exception:
@@ -576,7 +570,7 @@ def run_full_scan():
     def process_other(item):
         hist = get_yahoo_history(item["sid"])
         if hist is None:
-            return []
+            return [], None
         local = []
         for func, key in [
             (analyze_weekly_bull, "周線多頭"),
@@ -591,16 +585,232 @@ def run_full_scan():
             if r:
                 r.update({"sid": item["sid"], "name": item["name"], "sheet": item["sheet"], "hist": hist})
                 local.append((key, r))
-        return local
+        return local, (item["sid"], hist)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=CONFIG["BATCH_WORKERS"]) as ex:
         for f in concurrent.futures.as_completed([ex.submit(process_other, i) for i in main_stocks]):
             try:
-                for key, res in f.result():
+                local, pair = f.result()
+                if pair:
+                    hist_cache[pair[0]] = pair[1]
+                for key, res in local:
                     results[key].append(res)
             except Exception:
                 pass
-    return results
+    return results, hist_cache
+
+# ==============================================================================
+# 歷史回測（共用 hist_cache，手動執行）
+# ==============================================================================
+def _ma_at(closes, end_idx, period):
+    if end_idx + 1 < period:
+        return None
+    return sum(closes[end_idx - period + 1: end_idx + 1]) / period
+
+
+def _rsi_to(closes, end_idx, period=14):
+    """只算到 end_idx 的 RSI 序列（含 end_idx）"""
+    sub = closes[: end_idx + 1]
+    return calc_rsi(sub, period)
+
+
+def signals_at_bar(hist, i):
+    """在歷史第 i 根判斷當日會觸發哪些訊號。回傳 [(策略, 訊號名, side), ...]"""
+    closes, highs, lows = hist["closes"], hist["highs"], hist["lows"]
+    opens, vols = hist["opens"], hist["vols"]
+    n = i + 1
+    if n < 60:
+        return []
+    out = []
+    c0, c1, c2 = closes[i], closes[i - 1], closes[i - 2]
+    o0, o1, o2 = opens[i], opens[i - 1], opens[i - 2]
+    h0, l0 = highs[i], lows[i]
+    v0, v1, v2 = vols[i], vols[i - 1], vols[i - 2]
+    ma5 = _ma_at(closes, i, 5)
+    ma10 = _ma_at(closes, i, 10)
+    ma20 = _ma_at(closes, i, 20)
+    ma5_y = _ma_at(closes, i - 1, 5)
+    ma5_3 = _ma_at(closes, i - 3, 5)
+    ma10_3 = _ma_at(closes, i - 3, 10)
+    ma20_3 = _ma_at(closes, i - 3, 20)
+
+    # 周線多頭
+    if ma5 and ma10 and ma20 and ma5 > ma10 > ma20 and c0 > ma5 and v0 >= CONFIG["MIN_VOLUME"]:
+        avg5v = sum(vols[i - 5:i]) / 5 if i >= 5 else 0
+        volume_surge = avg5v > 0 and v0 >= avg5v * 1.5
+        sticky = False
+        if ma5_3 and ma10_3 and ma20_3:
+            prev_sp = max(ma5_3, ma10_3, ma20_3) - min(ma5_3, ma10_3, ma20_3)
+            curr_sp = max(ma5, ma10, ma20) - min(ma5, ma10, ma20)
+            if prev_sp / ma20_3 < 0.025 and curr_sp > prev_sp * 1.5 and ma5 > ma10:
+                sticky = True
+        three_white = (
+            c0 > o0 and c1 > o1 and c2 > o2 and c0 > c1 > c2
+            and o1 >= min(o2, c2) and o1 <= max(o2, c2)
+            and o0 >= min(o1, c1) and o0 <= max(o1, c1)
+        )
+        morning = (
+            c2 < o2 and abs(c1 - o1) <= (highs[i - 1] - lows[i - 1]) * 0.35
+            and c0 > o0 and c0 >= (c2 + o2) / 2
+        )
+        tags = ["均線多頭排列"]
+        if sticky:
+            tags.append("均線黏合後打開")
+        if volume_surge:
+            tags.append("爆量")
+        if three_white:
+            tags.append("三白兵")
+        if morning:
+            tags.append("晨星")
+        out.append(("周線多頭", " + ".join(tags), "long"))
+
+    # 金包銀
+    if n >= 250 and v0 >= 800000:
+        ma60 = _ma_at(closes, i, 60)
+        ma120 = _ma_at(closes, i, 120)
+        ma240 = _ma_at(closes, i, 240)
+        ma60_7 = _ma_at(closes, i - 7, 60)
+        ma120_7 = _ma_at(closes, i - 7, 120)
+        ma240_7 = _ma_at(closes, i - 7, 240)
+        if ma60 and ma120 and ma60_7 and ma120_7:
+            long_down = (ma120 < ma120_7) or (ma240 and ma240_7 and ma240 < ma240_7)
+            if long_down and ma60 - ma60_7 >= -0.008 * ma60:
+                if ma5 and ma10 and ma20 and ma5 > ma60 and ma10 > ma60 and ma20 > ma60 and c0 > ma60:
+                    if i >= 20 and l0 >= min(lows[i - 20:i]) * 0.995:
+                        out.append(("金包銀", "金包銀：長天期下壓+生命線支撐", "long"))
+
+    rsi = _rsi_to(closes, i, CONFIG["RSI_PERIOD"])
+    # RSI 抄底
+    if len(rsi) >= 2 and rsi[-1] is not None and rsi[-2] is not None:
+        if (rsi[-1] <= CONFIG["RSI_OVERSOLD"] and rsi[-2] <= CONFIG["RSI_OVERSOLD"]
+                and rsi[-1] > rsi[-2] and ma20 and c0 >= ma20 and v0 >= CONFIG["MIN_VOLUME"]):
+            out.append(("RSI抄底", f"RSI抄底：RSI≤{CONFIG['RSI_OVERSOLD']}且向上", "long"))
+
+    # 假突破／破底翻
+    if n >= 60 and v0 >= 800000 and i >= 23:
+        prev_low = min(lows[i - 22: i - 2])
+        if any(x < prev_low * 0.995 for x in lows[i - 2: i + 1]) and c0 > prev_low:
+            out.append(("假突破破底翻", "破底翻：跌破前低後站回", "long"))
+        prev_high = max(highs[i - 20: i])
+        if c0 > prev_high:
+            avg_vol = sum(vols[i - 20: i]) / 20
+            body, rng = abs(c0 - o0), h0 - l0
+            if avg_vol > 0 and v0 >= avg_vol * 1.5 and rng > 0 and body / rng >= 0.55:
+                out.append(("假突破破底翻", "真突破：突破前高+放量", "long"))
+
+    # 一夜持股
+    if n >= 30 and v0 >= CONFIG["MIN_VOLUME"] and c1 > 0:
+        chg = (c0 - c1) / c1
+        if CONFIG["OVERNIGHT_MIN_CHG"] <= chg <= CONFIG["OVERNIGHT_MAX_CHG"]:
+            has_limit = any(
+                closes[k - 1] > 0 and (closes[k] - closes[k - 1]) / closes[k - 1] >= CONFIG["OVERNIGHT_LIMIT_UP"]
+                for k in range(max(1, i - 19), i + 1)
+            )
+            avg5 = sum(vols[i - 5: i]) / 5 if i >= 5 else 0
+            vol_ok = avg5 > 0 and v0 / avg5 >= CONFIG["OVERNIGHT_VOL_RATIO"] and v0 > v1 > v2
+            ma_ok = ma5 and ma10 and ma20 and ma5 > ma10 > ma20
+            shadow_ok = not (h0 - l0 > 0 and (h0 - c0) / (h0 - l0) > 0.30)
+            if has_limit and vol_ok and ma_ok and c0 > o0 and shadow_ok:
+                out.append(("一夜持股", "一夜持股：漲3～5%+曾漲停+量增+多頭", "long"))
+
+    # RSI 背離
+    if n >= 60 and v0 >= CONFIG["MIN_VOLUME"] and len(rsi) == n:
+        if all(rsi[j] is not None for j in range(max(0, n - 30), n)):
+            window_low = lows[i - 9: i + 1]
+            recent_low_idx = i - 9 + int(np.argmin(window_low))
+            prev_start = max(0, recent_low_idx - 25)
+            prev_end = max(prev_start + 1, recent_low_idx - 3)
+            if prev_end > prev_start and recent_low_idx >= i - 2:
+                prev_low_idx = prev_start + int(np.argmin(lows[prev_start:prev_end]))
+                if (closes[recent_low_idx] < closes[prev_low_idx]
+                        and rsi[recent_low_idx] > rsi[prev_low_idx]
+                        and rsi[recent_low_idx] < 40):
+                    out.append(("RSI背離", "底背離：價格新低RSI抬高", "long"))
+            window_high = highs[i - 9: i + 1]
+            recent_high_idx = i - 9 + int(np.argmax(window_high))
+            prev_h_start = max(0, recent_high_idx - 25)
+            prev_h_end = max(prev_h_start + 1, recent_high_idx - 3)
+            if prev_h_end > prev_h_start and recent_high_idx >= i - 2:
+                prev_high_idx = prev_h_start + int(np.argmax(highs[prev_h_start:prev_h_end]))
+                if (closes[recent_high_idx] > closes[prev_high_idx]
+                        and rsi[recent_high_idx] < rsi[prev_high_idx]
+                        and rsi[recent_high_idx] > 60):
+                    out.append(("RSI背離", "頂背離：價格新高RSI降低", "short"))
+
+    # RSI 鈍化
+    if n >= 40 and v0 >= CONFIG["MIN_VOLUME"]:
+        days, level = CONFIG["RSI_PASSIVATION_DAYS"], CONFIG["RSI_PASSIVATION_LEVEL"]
+        ok = all(
+            (rsi[i - k] is not None and rsi[i - k] >= level)
+            for k in range(days) if i - k >= 0
+        )
+        if ok and ma5 and ma5_y and c0 > ma5 and ma5 > ma5_y:
+            if ma20 is None or c0 >= ma20:
+                out.append(("RSI鈍化", f"RSI鈍化：連續{days}日≥{level}+站上五日線", "long"))
+
+    # 均線轉折（短20長60）
+    for label, period in (("短", 20), ("長", 60)):
+        ma_t = _ma_at(closes, i, period)
+        ma_y = _ma_at(closes, i - 1, period)
+        ma_b = _ma_at(closes, i - 2, period)
+        if not ma_t or not ma_y or not ma_b:
+            continue
+        if c1 <= ma_y and c0 > ma_t:
+            out.append(("均線轉折", f"突破均線({label}{period})", "long"))
+        if c1 >= ma_y and c0 < ma_t:
+            out.append(("均線轉折", f"跌破均線({label}{period})", "short"))
+        if c2 < ma_b and c1 > ma_y and l0 > ma_t and c0 > c1:
+            out.append(("均線轉折", f"2日法則({label}{period})", "long"))
+        if c1 < ma_y and c2 >= ma_b and c0 > ma_t:
+            out.append(("均線轉折", f"反2日({label}{period})", "long"))
+
+    return out
+
+
+def run_historical_backtest(hist_cache, signal_window=65):
+    """
+    用已下載的 hist_cache 做過去約 3 個月隔日勝率。
+    不重新呼叫 Yahoo。
+    """
+    from collections import defaultdict
+    stats = defaultdict(list)
+    if not hist_cache:
+        return pd.DataFrame()
+
+    for sid, hist in hist_cache.items():
+        closes = hist["closes"]
+        n = len(closes)
+        start_i = max(60, n - signal_window - 1)
+        end_i = n - 2
+        if start_i > end_i:
+            continue
+        for i in range(start_i, end_i + 1):
+            sigs = signals_at_bar(hist, i)
+            if not sigs:
+                continue
+            px0, px1 = closes[i], closes[i + 1]
+            if px0 <= 0:
+                continue
+            ret_long = (px1 - px0) / px0 * 100.0
+            for strategy, key, side in sigs:
+                ret = ret_long if side == "long" else -ret_long
+                stats[(strategy, key)].append(ret)
+
+    rows = []
+    for (strategy, key), rets in sorted(stats.items(), key=lambda x: (-len(x[1]), x[0][0])):
+        total = len(rets)
+        wins = sum(1 for r in rets if r > 0)
+        rows.append({
+            "策略": strategy,
+            "訊號": key,
+            "樣本數": total,
+            "勝場": wins,
+            "勝率%": round(wins / total * 100, 1) if total else 0.0,
+            "平均報酬%": round(float(np.mean(rets)), 2) if rets else 0.0,
+            "中位報酬%": round(float(np.median(rets)), 2) if rets else 0.0,
+        })
+    return pd.DataFrame(rows)
+
 
 def build_log_rows(results, scan_time: str):
     """把當次掃描轉成日誌列（附加、不刪）"""
@@ -773,25 +983,21 @@ def render_strategy_tab(data_list, strategy_name, win_rates):
 # ==============================================================================
 # 主介面
 # ==============================================================================
-st.title("🐯 台股八策略監控系統 v4")
-st.caption(f"時間：{time.strftime('%Y-%m-%d %H:%M:%S')}｜衝突彙整 + 訊號日誌 + 次日勝率")
-
-st.error("""
-⚠️ **關於「下午 2:30 自動更新」的重要說明**  
-Streamlit Cloud **無法**在無人開啟網頁時於 14:30 自動執行（會休眠）。  
-若要「即使不開網頁也記錄、也統計」，請用 **Google Apps Script 時間觸發器**（見下方說明檔）。  
-本版在「你開啟網頁或按掃描」時會：附加寫入日誌、回填待檢視訊號、更新勝率。
-""")
+st.title("🐯 台股八策略監控系統 v5")
+st.caption(f"時間：{time.strftime('%Y-%m-%d %H:%M:%S')}｜衝突彙整 + 訊號日誌 + 歷史回測（手動）")
 
 st.warning("所有勝率為樣本觀察、未經驗證，不構成投資建議。請自行嚴格停損。")
 
-# session 持久日誌（同一連線內）；正式長期請用 Apps Script 寫入試算表
 if "signal_log" not in st.session_state:
     st.session_state["signal_log"] = pd.DataFrame(columns=[
         "記錄時間", "訊號日期", "預計檢視日", "策略", "代號", "名稱", "方向", "side",
         "訊號價", "訊號內容", "建議買進", "建議停損", "建議目標",
         "次日收盤", "實際檢視日", "結果", "報酬%"
     ])
+if "hist_cache" not in st.session_state:
+    st.session_state["hist_cache"] = {}
+if "backtest_df" not in st.session_state:
+    st.session_state["backtest_df"] = None
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -805,20 +1011,21 @@ with col3:
         st.rerun()
 
 if do_scan or "scan_results" not in st.session_state:
-    with st.spinner("掃描八大策略中..."):
-        results = run_full_scan()
+    with st.spinner("掃描八大策略中（同時快取日線供回測共用）..."):
+        results, hist_cache = run_full_scan()
         st.session_state["scan_results"] = results
+        st.session_state["hist_cache"] = hist_cache
         st.session_state["scan_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        # 附加日誌（不刪舊的）
         new_rows = build_log_rows(results, st.session_state["scan_time"])
         if new_rows:
-            # 避免同一訊號日期+策略+代號重複附加（同一天多次掃描只留最新一輪可選；此處採附加但標註時間）
             add_df = pd.DataFrame(new_rows)
             st.session_state["signal_log"] = pd.concat(
                 [st.session_state["signal_log"], add_df], ignore_index=True
             )
     if do_scan:
-        st.success(f"已掃描並附加 {len(new_rows)} 筆訊號到日誌（不刪除歷史）")
+        st.success(
+            f"已掃描並附加 {len(new_rows)} 筆訊號｜已快取 {len(st.session_state['hist_cache'])} 檔日線（可供歷史回測）"
+        )
 
 if do_eval:
     with st.spinner("回填次日收盤與勝負..."):
@@ -829,9 +1036,8 @@ results = st.session_state.get("scan_results", {})
 log_df = st.session_state["signal_log"]
 win_rates = calc_win_rates(log_df)
 
-# 勝率總表
 if win_rates:
-    st.subheader("📈 各策略次日勝率（累計）")
+    st.subheader("📈 日誌累計次日勝率（手動回填後才有）")
     wr_df = pd.DataFrame([
         {"策略": k, "樣本數": v["n"], "勝場": v["wins"], "勝率%": v["rate"], "平均報酬%": v["avg_ret"]}
         for k, v in win_rates.items()
@@ -839,6 +1045,7 @@ if win_rates:
     st.dataframe(wr_df, use_container_width=True, hide_index=True)
 
 tabs = st.tabs([
+    "📉 歷史回測（3個月）",
     "⚡ 衝突／彙整", "📋 訊號日誌",
     "🔥 均線轉折", "⚔️ 周線多頭", "🌟 金包銀", "📉 RSI抄底",
     "🔄 假突破破底翻", "🌙 一夜持股", "📊 RSI背離", "📈 RSI鈍化"
@@ -846,9 +1053,48 @@ tabs = st.tabs([
 
 with tabs[0]:
     st.markdown("""
+### 過去約 3 個月「隔日收盤」勝率（手動更新）
+
+**規則**  
+- 訊號日收盤成立 → 看**下一交易日收盤**  
+- 買進類：隔日上漲為勝；賣出類：隔日下跌為勝  
+- **不會每次掃描自動跑**，請按下方按鈕手動執行  
+- **使用掃描時已下載的日線**，不再重複向 Yahoo 抓資料  
+
+請先按上方「同步掃描」至少一次（建立日線快取），再按回測。
+""")
+    n_cache = len(st.session_state.get("hist_cache") or {})
+    st.caption(f"目前日線快取：{n_cache} 檔")
+    do_bt = st.button("▶ 手動執行歷史回測（約3個月）", type="primary", use_container_width=True)
+    if do_bt:
+        if n_cache == 0:
+            st.error("尚無日線快取。請先按「同步掃描並附加寫入日誌」。")
+        else:
+            with st.spinner(f"用已快取的 {n_cache} 檔日線計算中（不重複下載）..."):
+                st.session_state["backtest_df"] = run_historical_backtest(st.session_state["hist_cache"])
+                st.session_state["backtest_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            st.success("回測完成")
+
+    bt = st.session_state.get("backtest_df")
+    if bt is not None and not bt.empty:
+        st.caption(f"回測完成時間：{st.session_state.get('backtest_time', '')}")
+        st.dataframe(bt, use_container_width=True, hide_index=True)
+        st.download_button(
+            "下載回測勝率 CSV",
+            bt.to_csv(index=False).encode("utf-8-sig"),
+            "歷史回測_訊號勝率.csv",
+            "text/csv",
+        )
+        st.info("樣本數太少（例如 <20）時勝率不穩定；未扣手續費／稅。")
+    elif bt is not None and bt.empty:
+        st.warning("回測無樣本（快取資料可能不足 60 根日K）。")
+    else:
+        st.info("尚未執行回測。按上方按鈕開始。")
+
+with tabs[1]:
+    st.markdown("""
 **同一檔股票出現在多個策略時集中於此。**  
-若一邊「買進」、一邊「賣出／減碼」會標成衝突，方便你對照，避免搞混。  
-歷史不會因重新掃描而刪除（見「訊號日誌」分頁）。
+若一邊「買進」、一邊「賣出／減碼」會標成衝突，方便你對照，避免搞混。
 """)
     conflict_df = build_conflict_table(results)
     if conflict_df.empty:
@@ -856,37 +1102,35 @@ with tabs[0]:
     else:
         st.dataframe(conflict_df, use_container_width=True, hide_index=True)
 
-with tabs[1]:
+with tabs[2]:
     st.markdown("""
 **訊號日誌（附加、不刪除）**  
-每次按「同步掃描」會把當日訊號加上「記錄時間／訊號日期／預計檢視日」後附加進來。  
-按「回填待檢視」會用下一交易日收盤價判定勝／負（已排除週末；休市日表見程式內 2026 清單）。
+每次按「同步掃描」會附加寫入。按「回填待檢視」用次日收盤判定勝／負。
 """)
     if log_df is None or log_df.empty:
         st.info("尚無日誌。請先按「同步掃描並附加寫入日誌」。")
     else:
         st.caption(f"共 {len(log_df)} 筆｜待檢視 {(log_df['結果']=='待檢視').sum()} 筆")
-        # 顯示時隱藏 side 欄
         show_cols = [c for c in log_df.columns if c != "side"]
         st.dataframe(log_df[show_cols].iloc[::-1], use_container_width=True, hide_index=True)
         csv = log_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button("下載完整日誌 CSV", csv, "signal_log.csv", "text/csv")
 
-with tabs[2]:
-    render_strategy_tab(results.get("均線轉折", []), "均線轉折", win_rates)
 with tabs[3]:
-    render_strategy_tab(results.get("周線多頭", []), "周線多頭", win_rates)
+    render_strategy_tab(results.get("均線轉折", []), "均線轉折", win_rates)
 with tabs[4]:
-    render_strategy_tab(results.get("金包銀", []), "金包銀", win_rates)
+    render_strategy_tab(results.get("周線多頭", []), "周線多頭", win_rates)
 with tabs[5]:
-    render_strategy_tab(results.get("RSI抄底", []), "RSI抄底", win_rates)
+    render_strategy_tab(results.get("金包銀", []), "金包銀", win_rates)
 with tabs[6]:
-    render_strategy_tab(results.get("假突破破底翻", []), "假突破破底翻", win_rates)
+    render_strategy_tab(results.get("RSI抄底", []), "RSI抄底", win_rates)
 with tabs[7]:
-    render_strategy_tab(results.get("一夜持股", []), "一夜持股", win_rates)
+    render_strategy_tab(results.get("假突破破底翻", []), "假突破破底翻", win_rates)
 with tabs[8]:
-    render_strategy_tab(results.get("RSI背離", []), "RSI背離", win_rates)
+    render_strategy_tab(results.get("一夜持股", []), "一夜持股", win_rates)
 with tabs[9]:
+    render_strategy_tab(results.get("RSI背離", []), "RSI背離", win_rates)
+with tabs[10]:
     render_strategy_tab(results.get("RSI鈍化", []), "RSI鈍化", win_rates)
 
 st.markdown("---")
