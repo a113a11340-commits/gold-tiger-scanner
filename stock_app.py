@@ -830,7 +830,7 @@ def build_conflict_table(results):
         })
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["衝突", "策略數"], ascending=[False, False])
+    return pd.DataFrame(rows).sort_values(["衝突", "策略數"], ascending=[True, False])
 
 
 def make_chart(hist, title):
