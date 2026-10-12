@@ -73,7 +73,7 @@ MAIN_SHEET = {
 # 系統全域設定
 CONFIG = {
     "MIN_VOLUME": 500000,      # 最小成交量限制：預設 500,000 (500張)
-    "BATCH_WORKERS": 20,       # 多執行緒平行處理數量
+    "BATCH_WORKERS": 200,       # 多執行緒平行處理數量
     "CACHE_TTL": 300,          # 資料快取時間（秒）
 }
 
