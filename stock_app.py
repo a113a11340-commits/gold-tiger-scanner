@@ -1,21 +1,14 @@
 """
 ================================================================================
-台股精選訊號監控系統（Streamlit v21.0 廖婉婷創新高回測戰法與 20 大名師終極版）
+台股精選訊號監控系統（Streamlit v24.0 內含詳細中文說明與參數調整指南版）
 ================================================================================
-【廖婉婷「創新高回測月線」戰法邏輯與參數調整說明 (Detailed Strategy Guide)】
-1. 核心邏輯 (Core Logic)：
-   - 統一投顧總經理廖婉婷指出，在盤勢震盪時，強勢股往往會率先「創近期新高」，
-     這代表背後有實質的基本面獲利、規格升級（如 ASP 倍增、AI 零組件用量暴增）
-     以及法人大戶資金鎖碼。
-   - 實戰操作要點：當強勢股創新高後出現短線回檔，只要股價回測「短中期均線（5日/10日線）」
-     或「月線（MA20）」支撐，且基本面與大趨勢不變，就是絕佳的逢低切入（回檔買進）點位。
-2. 參數調整方式 (Adjustment Guide)：
-   - 創新高天數 (LOOKBACK_DAYS)：預設檢查近 60 日內是否創高。
-   - 回測月線容忍度 (PULLBACK_PCT)：檢查收盤價是否距離月線 (MA20) 0% ~ 3% 內（回測支撐）。
-   - 最小成交量 (MIN_VOLUME)：預設 500,000 (500張)，確保流動性。
-3. 完整收錄策略 (All 20 Strategies Preserved)：
-   - 包含廖婉婷創新高回測、廖婉婷基本面動能突破、林恩如20週均線W底、朱家泓頭頭高底底高、
-     施昇輝樂活KD、資金輪動主流、KD/MACD黃金交叉、阿水一/二式、背離與高勝率K線等共20種。
+【系統全域說明與參數調整總指南 (Global Guide & Parameter Adjustment)】
+1. 程式核心架構：
+   - 採用 Streamlit 建構網頁互動介面，結合 Yahoo Finance 非同步多執行緒抓取 300 天歷史K線。
+   - 保留 15 大經典名師與技術分析戰法，並全面強制要求站上月線（MA20），確保過濾掉空頭弱勢股。
+2. 參數調整方式（可在下方 CONFIG 字典或各函數內自行修改）：
+   - MIN_VOLUME (最小成交量)：預設 500,000 (500張)，若想篩選更熱絡個股可調高至 1,000,000。
+   - MAX_HISTORY (歷史天數)：預設 300 天，完美支援 100MA（20週均線）與中長線型態辨識。
 ================================================================================
 """
 
@@ -30,7 +23,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v21.0 終極大合集")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v24.0 說明註解版")
 
 # 樣式調整
 st.markdown("""
@@ -47,18 +40,13 @@ td { font-size: 16px !important; font-weight: bold !important;
 </style>
 """, unsafe_allow_html=True)
 
-# 【全 20 策略勝率對照表】
+# 【保留之 15 策略勝率對照表】
 WINRATE = {
-    "廖婉婷創新高回測月線": "61.2%",
-    "廖婉婷飆股邏輯": "60.5%",
     "林恩如20週均線W底": "58.5%",
     "朱家泓頭頭高底底高": "57.8%",
     "施昇輝0050樂活KD": "56.5%",
     "資金輪動主流強勢股": "59.2%",
-    "KD黃金交叉": "54.2%",
-    "MACD黃金交叉": "53.8%",
     "阿水一式": "53.5%",
-    "阿水二式": "50.0%",
     "貫穿線": "66.0%",
     "三內身": "65.0%",
     "大K棒收回": "68.0%",
@@ -122,41 +110,6 @@ def calc_rsi(closes, period=14):
         avg_loss = (avg_loss * (period - 1) + l) / period
         rsi[j] = 100.0 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
     return rsi
-
-
-def calc_ema(closes, period):
-    n = len(closes)
-    ema = [None] * n
-    if n < period:
-        return ema
-    multiplier = 2 / (period + 1)
-    ema[period - 1] = sum(closes[:period]) / period
-    for i in range(period, n):
-        ema[i] = (closes[i] - ema[i - 1]) * multiplier + ema[i - 1]
-    return ema
-
-
-def calc_macd(closes, fast=12, slow=26, signal=9):
-    ema_fast = calc_ema(closes, fast)
-    ema_slow = calc_ema(closes, slow)
-    macd_line = [None] * len(closes)
-    for i in range(len(closes)):
-        if ema_fast[i] is not None and ema_slow[i] is not None:
-            macd_line[i] = ema_fast[i] - ema_slow[i]
-    valid_macd = [m for m in macd_line if m is not None]
-    signal_line_raw = calc_ema(valid_macd, signal) if len(valid_macd) >= signal else []
-    signal_line = [None] * len(closes)
-    idx = 0
-    for i in range(len(closes)):
-        if macd_line[i] is not None:
-            if idx < len(signal_line_raw):
-                signal_line[i] = signal_line_raw[idx]
-            idx += 1
-    histogram = [None] * len(closes)
-    for i in range(len(closes)):
-        if macd_line[i] is not None and signal_line[i] is not None:
-            histogram[i] = (macd_line[i] - signal_line[i]) * 2
-    return macd_line, signal_line, histogram
 
 
 def calc_kd(highs, lows, closes, n=9):
@@ -288,79 +241,14 @@ def _pack(sid, name, sheet, hist, price, signal, direction, entry, stop, target,
 
 
 # ==============================================================================
-# 【策略 1】廖婉婷創新高回測月線戰法 [NEW! 對應影片 1oNiJPNVAQ4]
+# 【策略 1】林恩如 20週均線 (100MA) + W底不再破底戰法
 # ------------------------------------------------------------------------------
 # 【中文詳細說明與參數調整方式】：
-# 1. 邏輯說明：廖婉婷指出強勢股會率先創近期新高，代表基本面獲利與法人資金強勁。
-#    當強勢股創新高後短線回檔，若回測短中期均線或月線（MA20）附近獲得支撐，即為買點。
-# 2. 調整方式：檢查近 60 日內曾創高，且目前股價拉回至月線附近（距離月線 0%~3% 內），
-#    成交量大於 500 張，且收紅K或帶下影線止穩。
-# ==============================================================================
-def analyze_liaowanting_pullback_ma20(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    
-    ma20 = calc_ma_list(closes, 20)
-    if ma20[-1] is None or closes[-1] <= ma20[-1]:
-        return None  # 必須站在月線之上
-        
-    # 條件 1：近 60 日內曾經創下新高（代表中長線為強勢主流股）
-    recent_60_high = max(highs[-60:])
-    is_recent_high = highs[-1] >= recent_60_high * 0.98 or max(highs[-5:]) >= recent_60_high * 0.98
-    
-    # 條件 2：近期出現回檔，收盤價靠近月線（距離 MA20 在 3% 以內）
-    is_near_ma20 = (closes[-1] >= ma20[-1]) and (closes[-1] <= ma20[-1] * 1.03)
-    
-    # 條件 3：當日止穩（收紅K或低點有守）
-    is_stable = closes[-1] >= opens[-1] or lows[-1] <= ma20[-1] * 1.01
-    
-    if not (is_recent_high and is_near_ma20 and is_stable):
-        return None
-        
-    return {
-        "signal": "廖婉婷創新高回測月線：強勢股創高後回測MA20支撐止穩",
-        "direction": "買進（回檔佈局）", "side": "long", "winrate": WINRATE["廖婉婷創新高回測月線"],
-        "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(ma20[-1] * 0.97, 2),
-        "target": round(closes[-1] * 1.12, 2),
-        "how": "廖婉婷戰法：鎖定市值前50大或創新高強勢股，逢回測月線(MA20)支撐分批佈局，停損守月線下方3%",
-        "price": closes[-1],
-    }
-
-
-# ==============================================================================
-# 【策略 2】廖婉婷飆股動能突破戰法 (法人鎖碼前高突破 + 嚴格站上月線)
-# ==============================================================================
-def analyze_liaowanting_growth_breakout(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 100 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    ma20 = calc_ma_list(closes, 20)
-    if ma20[-1] is None or closes[-1] <= ma20[-1]:
-        return None
-    recent_high = max(highs[-40:-1]) if n >= 41 else max(highs[:-1])
-    is_breakout = closes[-1] >= recent_high
-    avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
-    is_volume_surge = avg5_vol > 0 and vols[-1] >= avg5_vol * 1.8
-    is_bullish = closes[-1] > opens[-1]
-    if not (is_breakout and is_volume_surge and is_bullish):
-        return None
-    return {
-        "signal": "廖婉婷飆股邏輯：法人資金爆量突破前高 + 嚴格站上月線",
-        "direction": "買進", "side": "long", "winrate": WINRATE["廖婉婷飆股邏輯"],
-        "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
-        "target": round(closes[-1] * 1.15, 2),
-        "how": "基本面成長與法人鎖碼強勢股，帶量突破前高且站上月線",
-        "price": closes[-1],
-    }
-
-
-# ==============================================================================
-# 【策略 3】林恩如 20週均線 (100MA) + W底不再破底 + 嚴格站上月線
+# 1. 核心邏輯：鎖定長期大趨勢向上的個股（站上 100MA/20週均線），並在回檔時形成 W 底，
+#    右腳不破左腳（不再破底），配合帶量突破月線與頸線。
+# 2. 參數調整方式：
+#    - 均線週期：程式使用 100MA 代表 20 週均線。若想改為長天期可將期間設為 120。
+#    - 量能倍數：預設成交量需大於前 5 日均量的 1.3 倍（`vols[-1] >= avg5_vol * 1.3`）。
 # ==============================================================================
 def analyze_lin_20w_w_bottom(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -388,7 +276,13 @@ def analyze_lin_20w_w_bottom(hist):
 
 
 # ==============================================================================
-# 【策略 4】朱家泓「頭頭高、底底高」飆股多頭結構 + 嚴格站上月線
+# 【策略 2】朱家泓「頭頭高、底底高」飆股多頭結構戰法
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：檢視過去 60 日內的波段高低點，確認是否呈現「頭頭高（Higher Highs）」
+#    且「底底高（Higher Lows）」的標準多頭排列結構，並配合帶量突破月線。
+# 2. 參數調整方式：
+#    - 檢視區間：預設為近 60 日（分成前 30 日與後 30 日比對）。可依短中線需求縮短至 40 日。
 # ==============================================================================
 def analyze_chujiahung_bottom(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -419,7 +313,13 @@ def analyze_chujiahung_bottom(hist):
 
 
 # ==============================================================================
-# 【策略 5】施昇輝 0050 樂活 KD 戰法 (KD < 20 超賣區 + 站上月線)
+# 【策略 3】施昇輝 0050 樂活 KD 戰法
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：參考樂活大叔施昇輝的 0050 逢低佈局法，當 KD 指標雙雙跌入 20 以下的
+#    低檔超賣區，且股價站上月線（MA20）時，視為超跌反彈的逢低買進良機。
+# 2. 參數調整方式：
+#    - 超賣閥值：預設 KD < 20。若想放寬條件可改為 25。
 # ==============================================================================
 def analyze_shishenghui_kd(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -444,7 +344,13 @@ def analyze_shishenghui_kd(hist):
 
 
 # ==============================================================================
-# 【策略 6】林恩如 資金輪動主流強勢股
+# 【策略 4】林恩如 資金輪動主流強勢股
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：鎖定盤面資金點火的主流族群，當股價站在 100MA 與月線之上，且接近
+#    近 60 日高點（3% 以內），伴隨成交量暴增 1.5 倍以上時進場追強。
+# 2. 參數調整方式：
+#    - 接近高點比例：預設 `closes[-1] >= recent_high_60 * 0.97`（97% 也就是 3% 以內）。
 # ==============================================================================
 def analyze_lin_sector_rotation(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -472,57 +378,14 @@ def analyze_lin_sector_rotation(hist):
 
 
 # ==============================================================================
-# 【策略 7】KD 黃金交叉 (結合 MA20)
-# ==============================================================================
-def analyze_kd_golden_cross(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    k_list, d_list = calc_kd(highs, lows, closes, n=9)
-    ma20 = calc_ma_list(closes, 20)
-    if None in (k_list[-1], k_list[-2], d_list[-1], d_list[-2], ma20[-1]):
-        return None
-    if not ((k_list[-2] < d_list[-2]) and (k_list[-1] >= d_list[-1]) and k_list[-1] < 60 and closes[-1] > ma20[-1]):
-        return None
-    return {
-        "signal": f"KD黃金交叉：K上穿D且站上月線(MA20)",
-        "direction": "買進", "side": "long", "winrate": WINRATE["KD黃金交叉"],
-        "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
-        "target": round(closes[-1] * 1.09, 2),
-        "how": "低檔黃金交叉且站上月線，停損守MA20",
-        "price": closes[-1],
-    }
-
-
-# ==============================================================================
-# 【策略 8】MACD 黃金交叉 (結合 MA20)
-# ==============================================================================
-def analyze_macd_golden_cross(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    macd, signal, hist_val = calc_macd(closes, 12, 26, 9)
-    ma20 = calc_ma_list(closes, 20)
-    if None in (hist_val[-1], hist_val[-2], ma20[-1]):
-        return None
-    if not ((hist_val[-2] < 0) and (hist_val[-1] >= 0) and closes[-1] > ma20[-1]):
-        return None
-    return {
-        "signal": "MACD黃金交叉：柱狀體由負翻正且站上月線(MA20)",
-        "direction": "買進", "side": "long", "winrate": WINRATE["MACD黃金交叉"],
-        "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
-        "target": round(closes[-1] * 1.09, 2),
-        "how": "MACD動能轉強且站上月線，停損守MA20",
-        "price": closes[-1],
-    }
-
-
-# ==============================================================================
-# 【策略 9】阿水一式（布林壓縮突破）
+# 【策略 5】股市阿水一式（布林通道帶量突破）
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：當布林通道帶寬出現長期壓縮（代表籌碼沉澱），隨後爆出 2 倍以上均量，
+#    且收紅K帶量突破布林通道上軌時，代表大行情啟動。
+# 2. 參數調整方式：
+#    - 壓縮標準：近 10 日頻寬小於 60 日平均頻寬的 85%（`0.85`）。
+#    - 爆量標準：成交量需達前 5 日均量的 2 倍（`2.0`）。
 # ==============================================================================
 def analyze_ashui_1(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -546,29 +409,11 @@ def analyze_ashui_1(hist):
 
 
 # ==============================================================================
-# 【策略 10】阿水二式（弱勢放空）
-# ==============================================================================
-def analyze_ashui_2(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    ma20 = calc_ma_list(closes, 20)
-    if None in (ma20[-1], ma20[-5]):
-        return None
-    if not (ma20[-1] < ma20[-5] and closes[-1] < ma20[-1] and closes[-1] < opens[-1]):
-        return None
-    return {
-        "signal": "阿水二式：MA20下彎且股價弱勢收黑破底",
-        "direction": "賣出／放空", "side": "short", "winrate": WINRATE["阿水二式"],
-        "entry": "-", "stop": "-", "target": round(closes[-1] * 0.92, 2),
-        "how": "均線下彎、反彈不過站穩MA20，停損守MA20上",
-        "price": closes[-1],
-    }
-
-
-# ==============================================================================
-# 【策略 11】貫穿線 (結合 MA20)
+# 【策略 6】貫穿線（高勝率K線反轉型態）
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：前一日為長黑K，當日開低後急拉收紅，且收盤價超越前一日黑K實體的
+#    中點以上，配合站上月線，為強烈多方反轉訊號。
 # ==============================================================================
 def analyze_piercing_line(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -594,7 +439,11 @@ def analyze_piercing_line(hist):
 
 
 # ==============================================================================
-# 【策略 12】三內身 (結合 MA20)
+# 【策略 7】三內身（孕線反轉確認）
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：前兩日形成母子孕線（第二日被第一日包覆），第三日收紅K強勢突破，
+#    確認多方表態，並要求站上月線。
 # ==============================================================================
 def analyze_three_inside_up(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -620,7 +469,11 @@ def analyze_three_inside_up(hist):
 
 
 # ==============================================================================
-# 【策略 13】大K棒強力收回
+# 【策略 8】大K棒強力收回
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：近期曾出現恐慌性的大黑K跌幅，當日以強勢長紅K完全收復該根大陰線的高點，
+#    代表主力強力洗盤後回頭吃貨，且股價站上月線。
 # ==============================================================================
 def analyze_power_candle_recovery(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -655,7 +508,11 @@ def analyze_power_candle_recovery(hist):
 
 
 # ==============================================================================
-# 【策略 14 & 15】三白兵 / 爆量三白兵
+# 【策略 9 & 10】三白兵 / 爆量三白兵
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：均線呈現多頭排列（MA5 > MA10 > MA20），連續三日收紅且價位墊高（三白兵），
+#    若伴隨爆量（1.5倍均量）則歸類為爆量三白兵，為強勢多方攻擊訊號。
 # ==============================================================================
 def analyze_bull_sanbaibing(hist, require_volume_surge=False):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -690,7 +547,11 @@ def analyze_bull_sanbaibing(hist, require_volume_surge=False):
 
 
 # ==============================================================================
-# 【策略 16】黏合後打開晨星
+# 【策略 11】均線黏合後打開晨星
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：短期均線（MA5, MA10, MA20）先前呈現極度糾結黏合（變盤前兆），隨後帶量張開
+#    且多頭排列，配合晨星反轉，為波段起漲訊號。
 # ==============================================================================
 def analyze_bull_sticky_morning(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -718,7 +579,11 @@ def analyze_bull_sticky_morning(hist):
 
 
 # ==============================================================================
-# 【策略 17】破底翻
+# 【策略 12】破底翻
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：股價假跌破前波低點後迅速拉回站上，形成誘空後的「破底翻」型態，
+#    且目前站在月線之上。
 # ==============================================================================
 def analyze_break_bottom_flip(hist):
     closes, highs, lows, vols = hist["closes"], hist["highs"], hist["lows"], hist["vols"]
@@ -743,7 +608,11 @@ def analyze_break_bottom_flip(hist):
 
 
 # ==============================================================================
-# 【策略 18】RSI 鈍化
+# 【策略 13】RSI 鈍化
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：14日 RSI 連續 5 天維持在 70 以上的高檔鈍化狀態，代表多方力道極強，
+#    沿著 5 日線強勢上攻。
 # ==============================================================================
 def analyze_rsi_passivation(hist):
     closes, vols = hist["closes"], hist["vols"]
@@ -771,7 +640,12 @@ def analyze_rsi_passivation(hist):
 
 
 # ==============================================================================
-# 【策略 19 & 20】多頭背離 / 頂背離 (RSI 5 & 10)
+# 【策略 14 & 15】多頭背離 / 頂背離 (RSI 5 & 10 檢驗)
+# ------------------------------------------------------------------------------
+# 【中文詳細說明與參數調整方式】：
+# 1. 核心邏輯：透過 RSI(5) 與 RSI(10) 計算價與指標的背離現象。
+#    - 多頭背離（底背離）：股價創新低，但 RSI 指標未創新低（暗示跌勢趨緩準備反轉）。
+#    - 頂背離：股價創新高，但 RSI 指標未創新高（暗示漲勢無力準備回檔）。
 # ==============================================================================
 def _swing_indices(values, order=3, find_min=True):
     out = []
@@ -873,12 +747,11 @@ def analyze_top_divergence(hist):
 
 
 # ==============================================================================
-# 完整 20 種策略鍵值對映清單 (完全無刪除)
+# 保留之 15 種策略鍵值對映清單
 # ==============================================================================
 SIGNAL_KEYS = [
-    "廖婉婷創新高回測月線", "廖婉婷飆股邏輯", "林恩如20週均線W底", "朱家泓頭頭高底底高", "施昇輝0050樂活KD", "資金輪動主流強勢股",
-    "KD黃金交叉", "MACD黃金交叉", "阿水一式", "阿水二式",
-    "貫穿線", "三內身", "大K棒收回", "三白兵", "爆量三白兵",
+    "林恩如20週均線W底", "朱家泓頭頭高底底高", "施昇輝0050樂活KD", "資金輪動主流強勢股",
+    "阿水一式", "貫穿線", "三內身", "大K棒收回", "三白兵", "爆量三白兵",
     "黏合晨星", "破底翻", "RSI鈍化", "多頭背離", "頂背離"
 ]
 
@@ -904,16 +777,11 @@ def run_full_scan():
         item = {**item, "hist": hist}
         found = []
         mapping = [
-            ("廖婉婷創新高回測月線", analyze_liaowanting_pullback_ma20),
-            ("廖婉婷飆股邏輯", analyze_liaowanting_growth_breakout),
             ("林恩如20週均線W底", analyze_lin_20w_w_bottom),
             ("朱家泓頭頭高底底高", analyze_chujiahung_bottom),
             ("施昇輝0050樂活KD", analyze_shishenghui_kd),
             ("資金輪動主流強勢股", analyze_lin_sector_rotation),
-            ("KD黃金交叉", analyze_kd_golden_cross),
-            ("MACD黃金交叉", analyze_macd_golden_cross),
             ("阿水一式", analyze_ashui_1),
-            ("阿水二式", analyze_ashui_2),
             ("貫穿線", analyze_piercing_line),
             ("三內身", analyze_three_inside_up),
             ("大K棒收回", analyze_power_candle_recovery),
@@ -1059,62 +927,52 @@ def render_signal_tab(data_list, title, note=""):
 # ==============================================================================
 # 網頁介面 (Streamlit UI)
 # ==============================================================================
-st.title("台股精選訊號 v21.0（廖婉婷創新高回測戰法與 20 大名師終極合集）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜完整整合廖婉婷創新高回測月線、飆股突破與各大名師戰法")
+st.title("台股精選訊號 v24.0（內含詳細中文說明與調整指南）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜保留 15 大經典名師與技術分析戰法")
 
 st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。")
 
-with st.expander("全策略總覽與勝率清單", expanded=True):
+with st.expander("策略總覽與勝率清單", expanded=True):
     st.markdown("""
 | 方向 | 訊號名稱 | 核心邏輯 / 參考勝率 |
 |------|----------|---------------------|
-| 買 | **廖婉婷創新高回測月線** | **61.2%**（強勢股創高後回測月線MA20支撐止穩） |
-| 買 | **廖婉婷飆股邏輯** | **60.5%**（法人資金爆量突破前高 + 嚴格站上月線） |
 | 買 | **林恩如20週均線W底** | **58.5%**（站上100MA與月線 + W底不再破底 + 帶量） |
 | 買 | **朱家泓頭頭高底底高** | **57.8%**（頭頭高、底底高多頭結構 + 站上月線帶量） |
 | 買 | 施昇輝0050樂活KD | **56.5%**（KD<20超賣區 + 站上月線逢低佈局） |
 | 買 | 資金輪動主流強勢股 | **59.2%**（100MA與月線之上 + 接近新高 + 爆量） |
-| 買 | KD黃金交叉 | **54.2%**（低檔黃金交叉 + 站上月線） |
-| 買 | MACD黃金交叉 | **53.8%**（柱狀體由負翻正 + 站上月線） |
 | 買 | 阿水一式 | **53.5%**（布林壓縮 + 2倍均量 + 紅K突破上軌） |
-| 賣 | 阿水二式 | **50.0%**（MA20下彎 + 弱勢破底） |
 | 買 | 貫穿線 / 三內身 | **66.0% / 65.0%**（高勝率反轉 + 站上月線） |
 | 買 | 大K棒強力收回 | **68.0%**（突破恐慌陰線 + 站上月線） |
 | 買 | 三白兵 / 爆量三白兵 / 黏合晨星 | **48.8% / 45.7% / 46.3%** |
 | 買 | 破底翻 / RSI鈍化 | **48.2% / 45.6%** |
 | 買 | 多頭背離 | **43.4%**（RSI5、RSI10 價新低RSI未新低） |
-| 賣 | 頂背離 | **54.4%**（RSI5、RSI10 價新高RSI未新高） |
+| 賣 | 頂背離 | **54.4%**（RSI5、RSI10 價新高RSI未新低） |
 """)
 
 col1, col2 = st.columns(2)
 with col1:
-    do_scan = st.button("同步掃描全部 20 種策略", use_container_width=True)
+    do_scan = st.button("同步掃描全部 15 種策略", use_container_width=True)
 with col2:
     if st.button("強制刷新", type="primary", use_container_width=True):
         st.cache_data.clear()
         SYMBOL_CACHE.clear()
         st.rerun()
 
-if do_scan or "scan_results_v21" not in st.session_state:
-    with st.spinner("掃描中（載入 300 天歷史資料並執行 20 種名師戰法）..."):
-        st.session_state["scan_results_v21"] = run_full_scan()
+if do_scan or "scan_results_v24" not in st.session_state:
+    with st.spinner("掃描中（載入 300 天歷史資料並執行 15 種名師戰法）..."):
+        st.session_state["scan_results_v24"] = run_full_scan()
     if do_scan:
         st.success("掃描完成")
 
-results = st.session_state.get("scan_results_v21", {})
+results = st.session_state.get("scan_results_v24", {})
 
 tabs = st.tabs([
     "衝突彙整",
-    "廖婉婷回測月線 61.2%",
-    "廖婉婷飆股突破 60.5%",
     "林恩如20週W底 58.5%",
     "朱家泓頭頭高 57.8%",
     "施昇輝樂活KD 56.5%",
     "資金輪動主流 59%",
-    "KD黃金交叉 54%",
-    "MACD黃金交叉 53%",
     "阿水一式 53%",
-    "阿水二式 50%",
     "貫穿線 66%",
     "三內身 65%",
     "大K棒收回 68%",
@@ -1136,44 +994,34 @@ with tabs[0]:
         st.dataframe(cdf, use_container_width=True, hide_index=True)
 
 with tabs[1]:
-    render_signal_tab(results.get("廖婉婷創新高回測月線", []), "廖婉婷創新高回測月線戰法", "歷史勝率 61.2%｜強勢股創高後回測 MA20 支撐止穩")
-with tabs[2]:
-    render_signal_tab(results.get("廖婉婷飆股邏輯", []), "廖婉婷飆股動能突破戰法", "歷史勝率 60.5%｜法人資金爆量突破前高 + 嚴格站上月線")
-with tabs[3]:
     render_signal_tab(results.get("林恩如20週均線W底", []), "林恩如 20 週均線 W 底戰法", "歷史勝率 58.5%｜站上 100MA 與月線 + W 底不再破底 + 帶量")
-with tabs[4]:
+with tabs[2]:
     render_signal_tab(results.get("朱家泓頭頭高底底高", []), "朱家泓頭頭高底底高戰法", "歷史勝率 57.8%｜頭頭高、底底高多頭結構 + 站上月線帶量")
-with tabs[5]:
+with tabs[3]:
     render_signal_tab(results.get("施昇輝0050樂活KD", []), "施昇輝 0050 樂活 KD 戰法", "歷史勝率 56.5%｜KD 雙雙跌破 20 低檔超賣區 + 站上月線")
-with tabs[6]:
+with tabs[4]:
     render_signal_tab(results.get("資金輪動主流強勢股", []), "資金輪動主流強勢股", "歷史勝率 59.2%｜100MA與月線之上 + 接近新高 + 爆量")
-with tabs[7]:
-    render_signal_tab(results.get("KD黃金交叉", []), "KD 黃金交叉", "歷史勝率 54.2%｜低檔黃金交叉 + 站上月線")
-with tabs[8]:
-    render_signal_tab(results.get("MACD黃金交叉", []), "MACD 黃金交叉", "歷史勝率 53.8%｜柱狀體由負翻正 + 站上月線")
-with tabs[9]:
+with tabs[5]:
     render_signal_tab(results.get("阿水一式", []), "阿水一式（布林壓縮突破）", "歷史勝率 53.5%｜壓縮 + 2倍均量 + 紅K突破通道頂")
-with tabs[10]:
-    render_signal_tab(results.get("阿水二式", []), "阿水二式（弱勢放空）", "歷史勝率 50.0%｜MA20下彎 + 弱勢破底")
-with tabs[11]:
+with tabs[6]:
     render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "歷史勝率 66.0%｜高勝率反轉 + 站上月線")
-with tabs[12]:
+with tabs[7]:
     render_signal_tab(results.get("三內身", []), "三內身", "歷史勝率 65.0%｜孕線確認 + 站上月線")
-with tabs[13]:
+with tabs[8]:
     render_signal_tab(results.get("大K棒收回", []), "大K棒強力收回", "歷史勝率 68.0%｜突破恐慌陰線 + 站上月線")
-with tabs[14]:
+with tabs[9]:
     render_signal_tab(results.get("三白兵", []), "多頭排列 + 三白兵", "歷史勝率 48.8%")
-with tabs[15]:
+with tabs[10]:
     render_signal_tab(results.get("爆量三白兵", []), "多頭排列 + 爆量 + 三白兵", "歷史勝率 45.7%")
-with tabs[16]:
+with tabs[11]:
     render_signal_tab(results.get("黏合晨星", []), "多頭排列 + 黏合打開 + 晨星", "歷史勝率 46.3%")
-with tabs[17]:
+with tabs[12]:
     render_signal_tab(results.get("破底翻", []), "破底翻", "歷史勝率 48.2%")
-with tabs[18]:
+with tabs[13]:
     render_signal_tab(results.get("RSI鈍化", []), "RSI 鈍化", "歷史勝率 45.6%")
-with tabs[19]:
+with tabs[14]:
     render_signal_tab(results.get("多頭背離", []), "一次／二度多頭背離", "RSI(5) 與 RSI(10) 檢查｜歷史底背離約 43.4%")
-with tabs[20]:
+with tabs[15]:
     render_signal_tab(results.get("頂背離", []), "RSI 頂背離（唯一賣出）", "RSI(5) 與 RSI(10) 檢查｜歷史勝率 54.4%")
 
 st.markdown("---")
