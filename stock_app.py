@@ -1,13 +1,17 @@
 """
 ================================================================================
-台股精選訊號監控系統（Streamlit v16.0 施昇輝0050樂活KD與多派名師整合版）
+台股精選訊號監控系統（Streamlit v17.0 全名師策略大合集終極版）
 ================================================================================
-【程式內建調整指南 (Adjustment Guide)】
-您可以在下方程式碼中調整以下參數：
-1. 最小成交量限制 (MIN_VOLUME)：預設 500,000 (500張)，ETF或大型權值股皆適用。
-2. 施昇輝 0050 樂活 KD 戰法參數 (analyze_shishenghui_kd)：
-   - 觸發條件：KD 指標之 K值與 D值同時小於 20（低檔超賣區），且股價站上月線（MA20）。
-3. 既有策略：包含朱家泓頭頭高底底高、林恩如20週均線W底、阿水一式、貫穿線等。
+【整合內容清單 (All-in-One Strategies)】
+1. 施昇輝 0050 樂活 KD 戰法 (KD < 20 低檔超賣區逢低佈局)
+2. 朱家泓「頭頭高、底底高」飆股多頭結構戰法
+3. 林恩如 20週均線 (100MA) + W底不再破底戰法
+4. KD 黃金交叉策略 (配合 MA20 趨勢過濾)
+5. MACD 黃金交叉策略
+6. 股市阿水一式 (布林通道壓縮 + 2倍均量突破)
+7. 股市阿水二式 (MA20下彎弱勢放空)
+8. 貫穿線、三內身、大K棒收回、三白兵、爆量三白兵、黏合晨星
+9. 破底翻、RSI 鈍化、一次/二度多頭背離、頂背離 (賣出/減碼)
 ================================================================================
 """
 
@@ -22,7 +26,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v16.0")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v17.0 終極大合集")
 
 # 樣式調整
 st.markdown("""
@@ -39,17 +43,25 @@ td { font-size: 16px !important; font-weight: bold !important;
 </style>
 """, unsafe_allow_html=True)
 
-# 【勝率對照表】（含施昇輝、朱家泓、林恩如與各大名師戰法）
+# 【全策略勝率對照表】
 WINRATE = {
     "施昇輝0050樂活KD": "56.5%",
     "朱家泓頭頭高底底高": "57.8%",
     "20週均線W底起長": "58.5%",
-    "阿水一式(布林突破)": "53.5%",
+    "KD黃金交叉": "54.2%",
+    "MACD黃金交叉": "53.8%",
+    "阿水一式": "53.5%",
+    "阿水二式": "50.0%",
     "貫穿線": "66.0%",
     "三內身": "65.0%",
     "大K棒收回": "68.0%",
+    "三白兵": "48.8%",
+    "爆量三白兵": "45.7%",
+    "黏合晨星": "46.3%",
     "破底翻": "48.2%",
-    "阿水二式(弱勢放空)": "50.0%",
+    "RSI鈍化": "45.6%",
+    "多頭背離": "43.4%",
+    "頂背離": "54.4%",
 }
 
 # 雲端清單來源設定
@@ -77,6 +89,66 @@ def calc_ma_list(closes, period):
     for i in range(period - 1, len(closes)):
         ma[i] = sum(closes[i - period + 1:i + 1]) / period
     return ma
+
+
+def calc_rsi(closes, period=14):
+    n = len(closes)
+    rsi = [None] * n
+    if n < period + 1:
+        return rsi
+    gains, losses = 0.0, 0.0
+    for i in range(1, period + 1):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains += diff
+        else:
+            losses -= diff
+    avg_gain = gains / period
+    avg_loss = losses / period
+    rsi[period] = 100.0 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
+    for j in range(period + 1, n):
+        d = closes[j] - closes[j - 1]
+        g = d if d > 0 else 0.0
+        l = -d if d < 0 else 0.0
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + l) / period
+        rsi[j] = 100.0 if avg_loss == 0 else 100 - (100 / (1 + avg_gain / avg_loss))
+    return rsi
+
+
+def calc_ema(closes, period):
+    n = len(closes)
+    ema = [None] * n
+    if n < period:
+        return ema
+    multiplier = 2 / (period + 1)
+    ema[period - 1] = sum(closes[:period]) / period
+    for i in range(period, n):
+        ema[i] = (closes[i] - ema[i - 1]) * multiplier + ema[i - 1]
+    return ema
+
+
+def calc_macd(closes, fast=12, slow=26, signal=9):
+    ema_fast = calc_ema(closes, fast)
+    ema_slow = calc_ema(closes, slow)
+    macd_line = [None] * len(closes)
+    for i in range(len(closes)):
+        if ema_fast[i] is not None and ema_slow[i] is not None:
+            macd_line[i] = ema_fast[i] - ema_slow[i]
+    valid_macd = [m for m in macd_line if m is not None]
+    signal_line_raw = calc_ema(valid_macd, signal) if len(valid_macd) >= signal else []
+    signal_line = [None] * len(closes)
+    idx = 0
+    for i in range(len(closes)):
+        if macd_line[i] is not None:
+            if idx < len(signal_line_raw):
+                signal_line[i] = signal_line_raw[idx]
+            idx += 1
+    histogram = [None] * len(closes)
+    for i in range(len(closes)):
+        if macd_line[i] is not None and signal_line[i] is not None:
+            histogram[i] = (macd_line[i] - signal_line[i]) * 2
+    return macd_line, signal_line, histogram
 
 
 def calc_kd(highs, lows, closes, n=9):
@@ -148,7 +220,7 @@ def get_yahoo_history(sid: str, max_n: int = 180):
                         t_dates.append(time.strftime("%Y-%m-%d", time.localtime(timestamps[i])))
                     else:
                         t_dates.append("")
-            if len(t_cls) < 100:
+            if len(t_cls) < 120:
                 continue
             SYMBOL_CACHE[sid] = sfx
             return {
@@ -201,40 +273,31 @@ def _pack(sid, name, sheet, hist, price, signal, direction, entry, stop, target,
 
 
 # ==============================================================================
-# 【新增策略】：施昇輝 0050 樂活 KD 波段戰法（KD < 20 低檔超賣區買進）
+# 【策略 1】施昇輝 0050 樂活 KD 戰法
 # ==============================================================================
 def analyze_shishenghui_kd(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
-    
     k_list, d_list = calc_kd(highs, lows, closes, n=9)
-    ma20 = calc_ma_list(closes, 20)
-    
-    if None in (k_list[-1], d_list[-1], ma20[-1]):
+    if None in (k_list[-1], d_list[-1]):
         return None
-        
-    # 條件：KD 均在 20 以下（低檔超賣區，符合施昇輝樂活大叔逢低買進波段點）
-    is_low_kd = (k_list[-1] < 20) and (d_list[-1] < 20)
-    
-    # 附帶輔助：準備打底或量縮止穩
-    if not is_low_kd:
+    if not (k_list[-1] < 20 and d_list[-1] < 20):
         return None
-        
     return {
-        "signal": f"施昇輝樂活KD：K({k_list[-1]:.1f})與D({k_list[-1]:.1f})雙雙跌破20低檔超賣區",
+        "signal": f"施昇輝樂活KD：K({k_list[-1]:.1f})與D({d_list[-1]:.1f})跌破20低檔超賣區",
         "direction": "買進（逢低佈局）", "side": "long", "winrate": WINRATE["施昇輝0050樂活KD"],
         "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(closes[-1] * 0.93, 2),  # 樂活法強調大不了套牢領股息，設 7% 停損或長抱
+        "stop": round(closes[-1] * 0.93, 2),
         "target": round(closes[-1] * 1.12, 2),
-        "how": "施昇輝0050無腦投資術：KD<20低檔超賣區勇敢逢低分批買進，等待KD>80再出場",
+        "how": "樂活大叔逢低買進波段點，KD<20分批佈局，等待KD>80出場",
         "price": closes[-1],
     }
 
 
 # ==============================================================================
-# 【既有精選戰法】
+# 【策略 2】朱家泓 頭頭高、底底高戰法
 # ==============================================================================
 def analyze_chujiahung_bottom(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -254,16 +317,19 @@ def analyze_chujiahung_bottom(hist):
     if not (avg5_vol > 0 and vols[-1] >= avg5_vol * 1.2 and closes[-1] > opens[-1]):
         return None
     return {
-        "signal": "朱家泓頭頭高底底高：形成頭頭高底底高多頭結構+站上MA20帶量",
+        "signal": "朱家泓頭頭高底底高：多頭結構成形+站上MA20帶量",
         "direction": "買進", "side": "long", "winrate": WINRATE["朱家泓頭頭高底底高"],
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
         "target": round(closes[-1] * 1.12, 2),
-        "how": "朱家泓飆股戰法：確認頭頭高、底底高與月線多頭排列",
+        "how": "確認頭頭高、底底高與月線多頭排列，停損守月線或近低",
         "price": closes[-1],
     }
 
 
+# ==============================================================================
+# 【策略 3】林恩如 20週均線 W底戰法
+# ==============================================================================
 def analyze_lin_20w_w_bottom(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -284,11 +350,64 @@ def analyze_lin_20w_w_bottom(hist):
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(lows[-1], ma100[-1] * 0.98), 2),
         "target": round(closes[-1] * 1.12, 2),
-        "how": "林恩如四大法寶核心：大趨勢向上且底部打底完成後帶量攻擊",
+        "how": "大趨勢向上且底部打底完成後帶量攻擊，停損守100MA",
         "price": closes[-1],
     }
 
 
+# ==============================================================================
+# 【策略 4】KD 黃金交叉
+# ==============================================================================
+def analyze_kd_golden_cross(hist):
+    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
+    n = len(closes)
+    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    k_list, d_list = calc_kd(highs, lows, closes, n=9)
+    ma20 = calc_ma_list(closes, 20)
+    if None in (k_list[-1], k_list[-2], d_list[-1], d_list[-2], ma20[-1]):
+        return None
+    if not ((k_list[-2] < d_list[-2]) and (k_list[-1] >= d_list[-1]) and k_list[-1] < 60 and closes[-1] > ma20[-1]):
+        return None
+    return {
+        "signal": f"KD黃金交叉：K({k_list[-1]:.1f})上穿D({d_list[-1]:.1f})且站上MA20",
+        "direction": "買進", "side": "long", "winrate": WINRATE["KD黃金交叉"],
+        "entry": round(closes[-1] * 1.005, 2),
+        "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
+        "target": round(closes[-1] * 1.09, 2),
+        "how": "低檔黃金交叉且多頭回檔結束，停損守MA20",
+        "price": closes[-1],
+    }
+
+
+# ==============================================================================
+# 【策略 5】MACD 黃金交叉
+# ==============================================================================
+def analyze_macd_golden_cross(hist):
+    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
+    n = len(closes)
+    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    macd, signal, hist_val = calc_macd(closes, 12, 26, 9)
+    ma20 = calc_ma_list(closes, 20)
+    if None in (hist_val[-1], hist_val[-2], ma20[-1]):
+        return None
+    if not ((hist_val[-2] < 0) and (hist_val[-1] >= 0) and closes[-1] > ma20[-1]):
+        return None
+    return {
+        "signal": "MACD黃金交叉：柱狀體由負翻正且站上MA20",
+        "direction": "買進", "side": "long", "winrate": WINRATE["MACD黃金交叉"],
+        "entry": round(closes[-1] * 1.005, 2),
+        "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
+        "target": round(closes[-1] * 1.09, 2),
+        "how": "MACD動能轉強，停損守MA20",
+        "price": closes[-1],
+    }
+
+
+# ==============================================================================
+# 【策略 6】阿水一式（布林壓縮突破）
+# ==============================================================================
 def analyze_ashui_1(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -301,7 +420,7 @@ def analyze_ashui_1(hist):
         return None
     return {
         "signal": "阿水一式：布林通道壓縮後帶量突破上軌",
-        "direction": "買進", "side": "long", "winrate": WINRATE["阿水一式(布林突破)"],
+        "direction": "買進", "side": "long", "winrate": WINRATE["阿水一式"],
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
         "target": round(closes[-1] * 1.10, 2),
@@ -310,6 +429,31 @@ def analyze_ashui_1(hist):
     }
 
 
+# ==============================================================================
+# 【策略 7】阿水二式（弱勢放空）
+# ==============================================================================
+def analyze_ashui_2(hist):
+    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
+    n = len(closes)
+    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    ma20 = calc_ma_list(closes, 20)
+    if None in (ma20[-1], ma20[-5]):
+        return None
+    if not (ma20[-1] < ma20[-5] and closes[-1] < ma20[-1] and closes[-1] < opens[-1]):
+        return None
+    return {
+        "signal": "阿水二式：MA20下彎且股價弱勢收黑破底",
+        "direction": "賣出／放空", "side": "short", "winrate": WINRATE["阿水二式"],
+        "entry": "-", "stop": "-", "target": round(closes[-1] * 0.92, 2),
+        "how": "均線下彎、反彈不過站穩MA20，停損守MA20上",
+        "price": closes[-1],
+    }
+
+
+# ==============================================================================
+# 【策略 8】貫穿線
+# ==============================================================================
 def analyze_piercing_line(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -328,11 +472,14 @@ def analyze_piercing_line(hist):
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(lows[-1], lows[-2], closes[-1] * 0.97), 2),
         "target": round(closes[-1] * 1.09, 2),
-        "how": "高勝率反轉型態",
+        "how": "高勝率反轉型態，停損守近期低點",
         "price": closes[-1],
     }
 
 
+# ==============================================================================
+# 【策略 9】三內身
+# ==============================================================================
 def analyze_three_inside_up(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -356,6 +503,104 @@ def analyze_three_inside_up(hist):
     }
 
 
+# ==============================================================================
+# 【策略 10】大K棒強力收回
+# ==============================================================================
+def analyze_power_candle_recovery(hist):
+    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
+    n = len(closes)
+    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    bodies = [abs(closes[i] - opens[i]) for i in range(n-20, n-1)]
+    avg_body = sum(bodies) / len(bodies) if bodies else 0
+    if avg_body == 0:
+        return None
+    big_bearish_idx = -1
+    for i in range(n-5, n-1):
+        if (opens[i] - closes[i]) >= avg_body * 2.5 and closes[i] < opens[i]:
+            big_bearish_idx = i
+            break
+    if big_bearish_idx == -1:
+        return None
+    if closes[-1] > highs[big_bearish_idx] and closes[-1] > opens[-1]:
+        return {
+            "signal": "大K棒強力收回：突破恐慌大陰線高點",
+            "direction": "買進", "side": "long", "winrate": WINRATE["大K棒收回"],
+            "entry": round(closes[-1] * 1.005, 2),
+            "stop": round(min(lows[-1], lows[big_bearish_idx] * 0.98), 2),
+            "target": round(closes[-1] * 1.10, 2),
+            "how": "恐慌賣壓大陰線被完全收回，停損守大陰線底下",
+            "price": closes[-1],
+        }
+    return None
+
+
+# ==============================================================================
+# 【策略 11 & 12】三白兵 / 爆量三白兵
+# ==============================================================================
+def analyze_bull_sanbaibing(hist, require_volume_surge=False):
+    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
+    n = len(closes)
+    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    ma5, ma10, ma20 = calc_ma_list(closes, 5), calc_ma_list(closes, 10), calc_ma_list(closes, 20)
+    if None in (ma5[-1], ma10[-1], ma20[-1]):
+        return None
+    if not (ma5[-1] > ma10[-1] > ma20[-1] and closes[-1] > ma5[-1]):
+        return None
+    d0, d1, d2 = closes[-1], closes[-2], closes[-3]
+    o0, o1, o2 = opens[-1], opens[-2], opens[-3]
+    if not (d0 > o0 and d1 > o1 and d2 > o2 and d0 > d1 > d2):
+        return None
+    avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
+    volume_surge = avg5_vol > 0 and vols[-1] >= avg5_vol * 1.5
+    if require_volume_surge and not volume_surge:
+        return None
+    if not require_volume_surge and volume_surge:
+        return None
+    sig = "均線多頭排列 + 爆量 + 三白兵" if require_volume_surge else "均線多頭排列 + 三白兵"
+    wr = WINRATE["爆量三白兵"] if require_volume_surge else WINRATE["三白兵"]
+    return {
+        "signal": sig, "direction": "買進", "side": "long", "winrate": wr,
+        "entry": round(closes[-1] * 1.005, 2),
+        "stop": round(min(lows[-1], closes[-1] * 0.97, ma10[-1] * 0.99), 2),
+        "target": round(closes[-1] * 1.08, 2),
+        "how": "回檔不破MA10再買；停損MA10下",
+        "price": closes[-1],
+    }
+
+
+# ==============================================================================
+# 【策略 13】黏合後打開晨星
+# ==============================================================================
+def analyze_bull_sticky_morning(hist):
+    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
+    n = len(closes)
+    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    ma5, ma10, ma20 = calc_ma_list(closes, 5), calc_ma_list(closes, 10), calc_ma_list(closes, 20)
+    if None in (ma5[-1], ma10[-1], ma20[-1], ma5[-3], ma10[-3], ma20[-3]):
+        return None
+    if not (ma5[-1] > ma10[-1] > ma20[-1] and closes[-1] > ma5[-1]):
+        return None
+    prev_spread = max(ma5[-3], ma10[-3], ma20[-3]) - min(ma5[-3], ma10[-3], ma20[-3])
+    curr_spread = max(ma5[-1], ma10[-1], ma20[-1]) - min(ma5[-1], ma10[-1], ma20[-1])
+    if not (prev_spread / ma20[-3] < 0.025 and curr_spread > prev_spread * 1.5 and ma5[-1] > ma10[-1]):
+        return None
+    return {
+        "signal": "均線多頭排列 + 黏合打開 + 晨星",
+        "direction": "買進", "side": "long", "winrate": WINRATE["黏合晨星"],
+        "entry": round(closes[-1] * 1.005, 2),
+        "stop": round(min(lows[-1], closes[-1] * 0.97, ma10[-1] * 0.99), 2),
+        "target": round(closes[-1] * 1.08, 2),
+        "how": "晨星＋黏合打開，回檔不破MA10",
+        "price": closes[-1],
+    }
+
+
+# ==============================================================================
+# 【策略 14】破底翻
+# ==============================================================================
 def analyze_break_bottom_flip(hist):
     closes, highs, lows, vols = hist["closes"], hist["highs"], hist["lows"], hist["vols"]
     n = len(closes)
@@ -369,14 +614,147 @@ def analyze_break_bottom_flip(hist):
             "entry": round(closes[-1] * 1.005, 2),
             "stop": round(prev_low * 0.985, 2),
             "target": round(closes[-1] * 1.07, 2),
-            "how": "站回前低後買",
+            "how": "站回前低後買，停損前低下約1.5%",
             "price": closes[-1],
         }
     return None
 
 
+# ==============================================================================
+# 【策略 15】RSI 鈍化
+# ==============================================================================
+def analyze_rsi_passivation(hist):
+    closes, vols = hist["closes"], hist["vols"]
+    n = len(closes)
+    if n < 40 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    rsi = calc_rsi(closes, 14)
+    if any(r is None or r < 70 for r in rsi[-5:]):
+        return None
+    ma5 = calc_ma_list(closes, 5)
+    if ma5[-1] is None or ma5[-2] is None or closes[-1] <= ma5[-1] or ma5[-1] <= ma5[-2]:
+        return None
+    return {
+        "signal": f"RSI鈍化：連續5日≥70（{rsi[-1]:.1f}）+站上五日線",
+        "direction": "買進（順勢）", "side": "long", "winrate": WINRATE["RSI鈍化"],
+        "entry": round(closes[-1] * 1.005, 2),
+        "stop": round(min(ma5[-1] * 0.99, closes[-1] * 0.97), 2),
+        "target": round(closes[-1] * 1.06, 2),
+        "how": "跌破五日線或RSI<70出場",
+        "price": closes[-1],
+    }
+
+
+# ==============================================================================
+# 【策略 16 & 17】多頭背離 / 頂背離 (RSI 5 & 10)
+# ==============================================================================
+def _swing_indices(values, order=3, find_min=True):
+    out = []
+    n = len(values)
+    for i in range(order, n - order):
+        window = values[i - order:i + order + 1]
+        if find_min:
+            if values[i] == min(window):
+                out.append(i)
+        else:
+            if values[i] == max(window):
+                out.append(i)
+    return out
+
+
+def _div_pairs_for_period(closes, lows, highs, rsi, look, bull=True):
+    n = len(closes)
+    base = n - look
+    if bull:
+        swings = [base + i for i in _swing_indices(lows[-look:], order=3, find_min=True)]
+        pairs = []
+        for a, b in zip(swings, swings[1:]):
+            if lows[b] < lows[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] > rsi[a]:
+                pairs.append((a, b))
+        return pairs
+    swings = [base + i for i in _swing_indices(highs[-look:], order=3, find_min=False)]
+    pairs = []
+    for a, b in zip(swings, swings[1:]):
+        if highs[b] > highs[a] and rsi[b] is not None and rsi[a] is not None and rsi[b] < rsi[a]:
+            pairs.append((a, b))
+    return pairs
+
+
+def _best_div(closes, lows, highs, bull=True):
+    n = len(closes)
+    look = min(80, n - 1)
+    near = n - 8
+    found_double, found_single = [], []
+    for period in (5, 10):
+        rsi = calc_rsi(closes, period)
+        if any(x is None for x in rsi[-50:]):
+            continue
+        pairs = _div_pairs_for_period(closes, lows, highs, rsi, look, bull=bull)
+        if not pairs or pairs[-1][1] < near:
+            continue
+        last = pairs[-1]
+        is_double = False
+        if len(pairs) >= 2:
+            prev = pairs[-2]
+            if prev[1] == last[0] or (last[1] - prev[1] <= 40):
+                is_double = True
+        item = (period, last, rsi[-1])
+        if is_double:
+            found_double.append(item)
+        else:
+            found_single.append(item)
+    chosen = found_double if found_double else found_single
+    if not chosen:
+        return None
+    rsi_txt = "、".join(f"RSI{p}={rv:.1f}" for p, _, rv in chosen)
+    last_idx = max(last for _, last, _ in chosen)[1]
+    return {"is_double": bool(found_double), "rsi_txt": rsi_txt, "last_idx": last_idx}
+
+
+def analyze_bull_divergence(hist):
+    closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
+    if len(closes) < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    info = _best_div(closes, lows, highs, bull=True)
+    if not info:
+        return None
+    tag = "二度多頭背離" if info["is_double"] else "一次多頭背離"
+    return {
+        "signal": f"{tag}：價新低RSI未新低（{info['rsi_txt']}）",
+        "direction": "買進（觀察反轉）", "side": "long", "winrate": WINRATE["多頭背離"],
+        "entry": round(closes[-1] * 1.005, 2),
+        "stop": round(min(lows[info["last_idx"]] * 0.98, closes[-1] * 0.96), 2),
+        "target": round(closes[-1] * 1.07, 2),
+        "how": "停損背離低點下。RSI用5與10檢查。",
+        "price": closes[-1],
+    }
+
+
+def analyze_top_divergence(hist):
+    closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
+    if len(closes) < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
+        return None
+    info = _best_div(closes, lows, highs, bull=False)
+    if not info:
+        return None
+    tag = "二度空頭背離" if info["is_double"] else "一次空頭背離（頂背離）"
+    return {
+        "signal": f"{tag}：價新高RSI未新低（{info['rsi_txt']}）",
+        "direction": "賣出／減碼", "side": "short", "winrate": WINRATE["頂背離"],
+        "entry": "-", "stop": "-", "target": round(closes[-1] * 0.95, 2),
+        "how": "持有者減碼；空手不追高。",
+        "price": closes[-1],
+    }
+
+
+# ==============================================================================
+# 完整策略鍵值對映清單 (完全無刪除)
+# ==============================================================================
 SIGNAL_KEYS = [
-    "施昇輝0050樂活KD", "朱家泓頭頭高底底高", "20週均線W底起長", "阿水一式", "貫穿線", "三內身", "破底翻"
+    "施昇輝0050樂活KD", "朱家泓頭頭高底底高", "20週均線W底起長",
+    "KD黃金交叉", "MACD黃金交叉", "阿水一式", "阿水二式",
+    "貫穿線", "三內身", "大K棒收回", "三白兵", "爆量三白兵",
+    "黏合晨星", "破底翻", "RSI鈍化", "多頭背離", "頂背離"
 ]
 
 
@@ -404,10 +782,20 @@ def run_full_scan():
             ("施昇輝0050樂活KD", analyze_shishenghui_kd),
             ("朱家泓頭頭高底底高", analyze_chujiahung_bottom),
             ("20週均線W底起長", analyze_lin_20w_w_bottom),
+            ("KD黃金交叉", analyze_kd_golden_cross),
+            ("MACD黃金交叉", analyze_macd_golden_cross),
             ("阿水一式", analyze_ashui_1),
+            ("阿水二式", analyze_ashui_2),
             ("貫穿線", analyze_piercing_line),
             ("三內身", analyze_three_inside_up),
+            ("大K棒收回", analyze_power_candle_recovery),
+            ("三白兵", lambda h: analyze_bull_sanbaibing(h, False)),
+            ("爆量三白兵", lambda h: analyze_bull_sanbaibing(h, True)),
+            ("黏合晨星", analyze_bull_sticky_morning),
             ("破底翻", analyze_break_bottom_flip),
+            ("RSI鈍化", analyze_rsi_passivation),
+            ("多頭背離", analyze_bull_divergence),
+            ("頂背離", analyze_top_divergence),
         ]
         for key, fn in mapping:
             r = fn(hist)
@@ -435,7 +823,7 @@ def build_conflict_table(results):
         if len(lst) < 2:
             continue
         dirs = set(x.get("direction", "") for x in lst)
-        conflict = any("買" in d for d in dirs) and any("賣" in d for d in dirs)
+        conflict = any("買" in d for d in dirs) and any("賣" in d or "減碼" in d for d in dirs)
         rows.append({
             "代號": sid,
             "名稱": lst[0]["name"],
@@ -543,50 +931,69 @@ def render_signal_tab(data_list, title, note=""):
 # ==============================================================================
 # 網頁介面 (Streamlit UI)
 # ==============================================================================
-st.title("台股精選訊號 v16.0（施昇輝0050樂活與多名師策略整合版）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜新增施昇輝 0050 樂活大叔 KD 低檔超賣區逢低佈局戰法")
+st.title("台股精選訊號 v17.0（全名師策略終極大合集）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜完整保留並融合施昇輝、朱家泓、林恩如、阿水與各大指標戰法")
 
 st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。")
 
-with st.expander("策略清單與勝率概覽", expanded=True):
+with st.expander("全策略總覽與勝率清單", expanded=True):
     st.markdown("""
 | 方向 | 訊號名稱 | 核心邏輯 / 參考勝率 |
 |------|----------|---------------------|
-| 買 | **施昇輝0050樂活KD** | **56.5%**（KD雙雙跌破20低檔超賣區，樂活逢低佈局） |
-| 買 | 朱家泓頭頭高底底高 | **57.8%**（頭頭高、底底高多頭結構 + 站上MA20帶量） |
-| 買 | 20週均線W底起長 | **58.5%**（站上100MA + W底不再破底 + 帶量突破） |
-| 買 | 阿水一式 | **53.5%**（布林壓縮 + 2倍均量 + 紅K突破上軌） |
+| 買 | **施昇輝0050樂活KD** | **56.5%**（KD雙雙跌破20低檔超賣區，逢低佈局） |
+| 買 | **朱家泓頭頭高底底高** | **57.8%**（頭頭高、底底高多頭結構 + 站上MA20帶量） |
+| 買 | **20週均線W底起長** | **58.5%**（站上100MA + W底不再破底 + 帶量突破） |
+| 買 | KD黃金交叉 | **54.2%**（K上穿D且KD<60、站上MA20） |
+| 買 | MACD黃金交叉 | **53.8%**（MACD柱狀體由負翻正 + 站上MA20） |
+| 買 | 阿水一式 | **53.5%**（布林通道壓縮 + 2倍均量 + 紅K突破上軌） |
+| 賣 | 阿水二式 | **50.0%**（MA20下彎 + 股價在均線下收黑破底） |
 | 買 | 貫穿線 | **66.0%**（上升趨勢回檔過實體中點） |
 | 買 | 三內身 | **65.0%**（孕線後第三根確認） |
+| 買 | 大K棒強力收回 | **68.0%**（突破恐慌大陰線高點） |
+| 買 | 三白兵 / 爆量三白兵 | **48.8% / 45.7%** |
+| 買 | 黏合晨星 | **46.3%** |
 | 買 | 破底翻 | **48.2%** |
+| 買 | RSI鈍化 | **45.6%** |
+| 買 | 多頭背離 | **43.4%**（RSI5、RSI10 價新低RSI未新低） |
+| 賣 | 頂背離 | **54.4%**（RSI5、RSI10 價新高RSI未新高） |
 """)
 
 col1, col2 = st.columns(2)
 with col1:
-    do_scan = st.button("同步掃描", use_container_width=True)
+    do_scan = st.button("同步掃描全部策略", use_container_width=True)
 with col2:
     if st.button("強制刷新", type="primary", use_container_width=True):
         st.cache_data.clear()
         SYMBOL_CACHE.clear()
         st.rerun()
 
-if do_scan or "scan_results_v16" not in st.session_state:
-    with st.spinner("掃描中（結合施昇輝0050樂活KD與各項名師戰法）..."):
-        st.session_state["scan_results_v16"] = run_full_scan()
+if do_scan or "scan_results_v17" not in st.session_state:
+    with st.spinner("掃描中（正在執行 17 種名師與指標戰法）..."):
+        st.session_state["scan_results_v17"] = run_full_scan()
     if do_scan:
         st.success("掃描完成")
 
-results = st.session_state.get("scan_results_v16", {})
+results = st.session_state.get("scan_results_v17", {})
 
 tabs = st.tabs([
     "衝突彙整",
-    "施昇輝0050樂活KD 56.5%",
-    "朱家泓頭頭高底底高 57.8%",
+    "施昇輝KD 56.5%",
+    "朱家泓頭頭高 57.8%",
     "20週均線W底 58.5%",
-    "阿水一式 53.5%",
+    "KD黃金交叉 54%",
+    "MACD黃金交叉 53%",
+    "阿水一式 53%",
+    "阿水二式 50%",
     "貫穿線 66%",
     "三內身 65%",
+    "大K棒收回 68%",
+    "三白兵 48%",
+    "爆量三白兵 45%",
+    "黏合晨星 46%",
     "破底翻 48%",
+    "RSI鈍化 45%",
+    "多頭背離 43%",
+    "頂背離 54%",
 ])
 
 with tabs[0]:
@@ -598,19 +1005,39 @@ with tabs[0]:
         st.dataframe(cdf, use_container_width=True, hide_index=True)
 
 with tabs[1]:
-    render_signal_tab(results.get("施昇輝0050樂活KD", []), "施昇輝0050樂活 KD 戰法", "歷史勝率 56.5%｜KD 雙雙跌破 20 低檔超賣區，逢低樂活佈局")
+    render_signal_tab(results.get("施昇輝0050樂活KD", []), "施昇輝0050樂活 KD 戰法", "歷史勝率 56.5%｜KD 雙雙跌破 20 低檔超賣區，逢低佈局")
 with tabs[2]:
     render_signal_tab(results.get("朱家泓頭頭高底底高", []), "朱家泓頭頭高底底高戰法", "歷史勝率 57.8%｜頭頭高、底底高多頭結構 + 站上 MA20 帶量")
 with tabs[3]:
     render_signal_tab(results.get("20週均線W底起長", []), "20週均線 W 底起長", "歷史勝率 58.5%｜站上 100MA 且 W 底打底完成、不再破底")
 with tabs[4]:
-    render_signal_tab(results.get("阿水一式", []), "阿水一式（布林壓縮突破）", "歷史勝率 53.5%｜壓縮 + 2倍均量 + 紅K突破通道頂")
+    render_signal_tab(results.get("KD黃金交叉", []), "KD 黃金交叉", "歷史勝率 54.2%｜低檔黃金交叉且站上 MA20")
 with tabs[5]:
-    render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "歷史勝率 66.0%｜高勝率反轉型態")
+    render_signal_tab(results.get("MACD黃金交叉", []), "MACD 黃金交叉", "歷史勝率 53.8%｜柱狀體由負翻正 + 站上 MA20")
 with tabs[6]:
-    render_signal_tab(results.get("三內身", []), "三內身", "歷史勝率 65.0%｜孕線第三根確認")
+    render_signal_tab(results.get("阿水一式", []), "阿水一式（布林壓縮突破）", "歷史勝率 53.5%｜壓縮 + 2倍均量 + 紅K突破通道頂")
 with tabs[7]:
+    render_signal_tab(results.get("阿水二式", []), "阿水二式（弱勢放空）", "歷史勝率 50.0%｜MA20下彎 + 弱勢破底")
+with tabs[8]:
+    render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "歷史勝率 66.0%｜高勝率反轉型態")
+with tabs[9]:
+    render_signal_tab(results.get("三內身", []), "三內身", "歷史勝率 65.0%｜孕線第三根確認")
+with tabs[10]:
+    render_signal_tab(results.get("大K棒收回", []), "大K棒強力收回", "歷史勝率 68.0%｜突破恐慌大陰線高點")
+with tabs[11]:
+    render_signal_tab(results.get("三白兵", []), "多頭排列 + 三白兵", "歷史勝率 48.8%")
+with tabs[12]:
+    render_signal_tab(results.get("爆量三白兵", []), "多頭排列 + 爆量 + 三白兵", "歷史勝率 45.7%")
+with tabs[13]:
+    render_signal_tab(results.get("黏合晨星", []), "多頭排列 + 黏合打開 + 晨星", "歷史勝率 46.3%")
+with tabs[14]:
     render_signal_tab(results.get("破底翻", []), "破底翻", "歷史勝率 48.2%")
+with tabs[15]:
+    render_signal_tab(results.get("RSI鈍化", []), "RSI 鈍化", "歷史勝率 45.6%")
+with tabs[16]:
+    render_signal_tab(results.get("多頭背離", []), "一次／二度多頭背離", "RSI(5) 與 RSI(10) 檢查｜歷史底背離約 43.4%")
+with tabs[17]:
+    render_signal_tab(results.get("頂背離", []), "RSI 頂背離（唯一賣出）", "RSI(5) 與 RSI(10) 檢查｜含二度｜歷史勝率 54.4%")
 
 st.markdown("---")
 st.caption("僅供學習監控。投資有風險，請獨立判斷並自負盈虧。")
