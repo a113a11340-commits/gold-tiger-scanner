@@ -1,14 +1,12 @@
 """
 ================================================================================
-台股精選訊號監控系統（Streamlit v24.0 內含詳細中文說明與參數調整指南版）
+台股精選訊號監控系統（Streamlit v26.0 阿水一式布林通道圖表專用修正版）
 ================================================================================
-【系統全域說明與參數調整總指南 (Global Guide & Parameter Adjustment)】
-1. 程式核心架構：
-   - 採用 Streamlit 建構網頁互動介面，結合 Yahoo Finance 非同步多執行緒抓取 300 天歷史K線。
-   - 保留 15 大經典名師與技術分析戰法，並全面強制要求站上月線（MA20），確保過濾掉空頭弱勢股。
-2. 參數調整方式（可在下方 CONFIG 字典或各函數內自行修改）：
-   - MIN_VOLUME (最小成交量)：預設 500,000 (500張)，若想篩選更熱絡個股可調高至 1,000,000。
-   - MAX_HISTORY (歷史天數)：預設 300 天，完美支援 100MA（20週均線）與中長線型態辨識。
+【更新說明】
+- 修正「阿水一式」策略的詳細K線圖：自動繪製布林通道（上軌、中軌MA20、下軌），
+  讓您能直覺觀察布林通道壓縮與帶量突破上軌的型態。
+- 衝突彙整排序保持「衝突：否」在前、「衝突：是」在後。
+- 完整保留 15 大經典名師與技術分析戰法。
 ================================================================================
 """
 
@@ -23,7 +21,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v24.0 說明註解版")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v26.0")
 
 # 樣式調整
 st.markdown("""
@@ -241,14 +239,7 @@ def _pack(sid, name, sheet, hist, price, signal, direction, entry, stop, target,
 
 
 # ==============================================================================
-# 【策略 1】林恩如 20週均線 (100MA) + W底不再破底戰法
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：鎖定長期大趨勢向上的個股（站上 100MA/20週均線），並在回檔時形成 W 底，
-#    右腳不破左腳（不再破底），配合帶量突破月線與頸線。
-# 2. 參數調整方式：
-#    - 均線週期：程式使用 100MA 代表 20 週均線。若想改為長天期可將期間設為 120。
-#    - 量能倍數：預設成交量需大於前 5 日均量的 1.3 倍（`vols[-1] >= avg5_vol * 1.3`）。
+# 15 大策略函數定義
 # ==============================================================================
 def analyze_lin_20w_w_bottom(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -275,15 +266,6 @@ def analyze_lin_20w_w_bottom(hist):
     }
 
 
-# ==============================================================================
-# 【策略 2】朱家泓「頭頭高、底底高」飆股多頭結構戰法
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：檢視過去 60 日內的波段高低點，確認是否呈現「頭頭高（Higher Highs）」
-#    且「底底高（Higher Lows）」的標準多頭排列結構，並配合帶量突破月線。
-# 2. 參數調整方式：
-#    - 檢視區間：預設為近 60 日（分成前 30 日與後 30 日比對）。可依短中線需求縮短至 40 日。
-# ==============================================================================
 def analyze_chujiahung_bottom(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -312,15 +294,6 @@ def analyze_chujiahung_bottom(hist):
     }
 
 
-# ==============================================================================
-# 【策略 3】施昇輝 0050 樂活 KD 戰法
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：參考樂活大叔施昇輝的 0050 逢低佈局法，當 KD 指標雙雙跌入 20 以下的
-#    低檔超賣區，且股價站上月線（MA20）時，視為超跌反彈的逢低買進良機。
-# 2. 參數調整方式：
-#    - 超賣閥值：預設 KD < 20。若想放寬條件可改為 25。
-# ==============================================================================
 def analyze_shishenghui_kd(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -343,15 +316,6 @@ def analyze_shishenghui_kd(hist):
     }
 
 
-# ==============================================================================
-# 【策略 4】林恩如 資金輪動主流強勢股
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：鎖定盤面資金點火的主流族群，當股價站在 100MA 與月線之上，且接近
-#    近 60 日高點（3% 以內），伴隨成交量暴增 1.5 倍以上時進場追強。
-# 2. 參數調整方式：
-#    - 接近高點比例：預設 `closes[-1] >= recent_high_60 * 0.97`（97% 也就是 3% 以內）。
-# ==============================================================================
 def analyze_lin_sector_rotation(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -377,16 +341,6 @@ def analyze_lin_sector_rotation(hist):
     }
 
 
-# ==============================================================================
-# 【策略 5】股市阿水一式（布林通道帶量突破）
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：當布林通道帶寬出現長期壓縮（代表籌碼沉澱），隨後爆出 2 倍以上均量，
-#    且收紅K帶量突破布林通道上軌時，代表大行情啟動。
-# 2. 參數調整方式：
-#    - 壓縮標準：近 10 日頻寬小於 60 日平均頻寬的 85%（`0.85`）。
-#    - 爆量標準：成交量需達前 5 日均量的 2 倍（`2.0`）。
-# ==============================================================================
 def analyze_ashui_1(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -408,13 +362,6 @@ def analyze_ashui_1(hist):
     }
 
 
-# ==============================================================================
-# 【策略 6】貫穿線（高勝率K線反轉型態）
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：前一日為長黑K，當日開低後急拉收紅，且收盤價超越前一日黑K實體的
-#    中點以上，配合站上月線，為強烈多方反轉訊號。
-# ==============================================================================
 def analyze_piercing_line(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -438,13 +385,6 @@ def analyze_piercing_line(hist):
     }
 
 
-# ==============================================================================
-# 【策略 7】三內身（孕線反轉確認）
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：前兩日形成母子孕線（第二日被第一日包覆），第三日收紅K強勢突破，
-#    確認多方表態，並要求站上月線。
-# ==============================================================================
 def analyze_three_inside_up(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -468,13 +408,6 @@ def analyze_three_inside_up(hist):
     }
 
 
-# ==============================================================================
-# 【策略 8】大K棒強力收回
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：近期曾出現恐慌性的大黑K跌幅，當日以強勢長紅K完全收復該根大陰線的高點，
-#    代表主力強力洗盤後回頭吃貨，且股價站上月線。
-# ==============================================================================
 def analyze_power_candle_recovery(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -507,13 +440,6 @@ def analyze_power_candle_recovery(hist):
     return None
 
 
-# ==============================================================================
-# 【策略 9 & 10】三白兵 / 爆量三白兵
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：均線呈現多頭排列（MA5 > MA10 > MA20），連續三日收紅且價位墊高（三白兵），
-#    若伴隨爆量（1.5倍均量）則歸類為爆量三白兵，為強勢多方攻擊訊號。
-# ==============================================================================
 def analyze_bull_sanbaibing(hist, require_volume_surge=False):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -546,13 +472,6 @@ def analyze_bull_sanbaibing(hist, require_volume_surge=False):
     }
 
 
-# ==============================================================================
-# 【策略 11】均線黏合後打開晨星
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：短期均線（MA5, MA10, MA20）先前呈現極度糾結黏合（變盤前兆），隨後帶量張開
-#    且多頭排列，配合晨星反轉，為波段起漲訊號。
-# ==============================================================================
 def analyze_bull_sticky_morning(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -578,13 +497,6 @@ def analyze_bull_sticky_morning(hist):
     }
 
 
-# ==============================================================================
-# 【策略 12】破底翻
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：股價假跌破前波低點後迅速拉回站上，形成誘空後的「破底翻」型態，
-#    且目前站在月線之上。
-# ==============================================================================
 def analyze_break_bottom_flip(hist):
     closes, highs, lows, vols = hist["closes"], hist["highs"], hist["lows"], hist["vols"]
     n = len(closes)
@@ -607,13 +519,6 @@ def analyze_break_bottom_flip(hist):
     return None
 
 
-# ==============================================================================
-# 【策略 13】RSI 鈍化
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：14日 RSI 連續 5 天維持在 70 以上的高檔鈍化狀態，代表多方力道極強，
-#    沿著 5 日線強勢上攻。
-# ==============================================================================
 def analyze_rsi_passivation(hist):
     closes, vols = hist["closes"], hist["vols"]
     n = len(closes)
@@ -639,14 +544,6 @@ def analyze_rsi_passivation(hist):
     }
 
 
-# ==============================================================================
-# 【策略 14 & 15】多頭背離 / 頂背離 (RSI 5 & 10 檢驗)
-# ------------------------------------------------------------------------------
-# 【中文詳細說明與參數調整方式】：
-# 1. 核心邏輯：透過 RSI(5) 與 RSI(10) 計算價與指標的背離現象。
-#    - 多頭背離（底背離）：股價創新低，但 RSI 指標未創新低（暗示跌勢趨緩準備反轉）。
-#    - 頂背離：股價創新高，但 RSI 指標未創新高（暗示漲勢無力準備回檔）。
-# ==============================================================================
 def _swing_indices(values, order=3, find_min=True):
     out = []
     n = len(values)
@@ -786,7 +683,7 @@ def run_full_scan():
             ("三內身", analyze_three_inside_up),
             ("大K棒收回", analyze_power_candle_recovery),
             ("三白兵", lambda h: analyze_bull_sanbaibing(h, False)),
-            ("爆量三白兵", lambda h: analyze_bull_sanbaibing(h, True)),
+            ("爆量3白兵", lambda h: analyze_bull_sanbaibing(h, True)),
             ("黏合晨星", analyze_bull_sticky_morning),
             ("破底翻", analyze_break_bottom_flip),
             ("RSI鈍化", analyze_rsi_passivation),
@@ -830,16 +727,21 @@ def build_conflict_table(results):
         })
     if not rows:
         return pd.DataFrame()
+    # 衝突「否」在前面，「是」在後面
     return pd.DataFrame(rows).sort_values(["衝突", "策略數"], ascending=[True, False])
 
 
-def make_chart(hist, title):
+# ==============================================================================
+# 圖表繪製函數 (支援針對「阿水一式」顯示布林通道軌道)
+# ==============================================================================
+def make_chart(hist, title, is_bollinger=False):
     closes = hist["closes"][-100:]
     opens = hist["opens"][-100:]
     highs = hist["highs"][-100:]
     lows = hist["lows"][-100:]
     vols = hist["vols"][-100:]
     x = list(range(len(closes)))
+    
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
     fig.add_trace(go.Candlestick(
         x=x, open=opens, high=highs, low=lows, close=closes,
@@ -847,10 +749,25 @@ def make_chart(hist, title):
         decreasing_line_color="#00A600", decreasing_fillcolor="#00A600",
         line_width=1.5, name="K線"
     ), row=1, col=1)
-    ma20 = calc_ma_list(hist["closes"], 20)[-100:]
-    ma100 = calc_ma_list(hist["closes"], 100)[-100:]
-    fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="月線(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x, y=ma100, mode="lines", name="100MA(20週)", line=dict(color="#FF4500", width=2)), row=1, col=1)
+    
+    if is_bollinger:
+        # 阿水一式專用：繪製布林通道（上軌、中軌MA20、下軌）
+        _, upper_all, lower_all, _ = calc_bollinger_bands(hist["closes"], period=20, num_std=2.0)
+        ma20_all = calc_ma_list(hist["closes"], 20)
+        upper = upper_all[-100:]
+        lower = lower_all[-100:]
+        ma20 = ma20_all[-100:]
+        
+        fig.add_trace(go.Scatter(x=x, y=upper, mode="lines", name="布林上軌", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="布林中軌(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
+    else:
+        # 其他策略：維持顯示月線與 100MA
+        ma20 = calc_ma_list(hist["closes"], 20)[-100:]
+        ma100 = calc_ma_list(hist["closes"], 100)[-100:]
+        fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="月線(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=ma100, mode="lines", name="100MA(20週)", line=dict(color="#FF4500", width=2)), row=1, col=1)
+        
     colors = ["#FF3333" if closes[i] >= opens[i] else "#00A600" for i in range(len(closes))]
     fig.add_trace(go.Bar(x=x, y=vols, marker_color=colors, name="量"), row=2, col=1)
     fig.update_layout(title=title, xaxis_rangeslider_visible=False,
@@ -870,7 +787,7 @@ def direction_html(direction: str) -> str:
     return d
 
 
-def render_signal_tab(data_list, title, note=""):
+def render_signal_tab(data_list, title, note="", is_bollinger=False):
     st.markdown(f"**{title}**")
     if note:
         st.caption(note)
@@ -920,15 +837,16 @@ def render_signal_tab(data_list, title, note=""):
                 f"停損 **{item.get('stop','-')}**｜目標 **{item.get('target','-')}**｜"
                 f"量 **{item.get('lots',0)}張**"
             )
-            fig = make_chart(item["hist"], f"{item['sid']} {item['name']}")
+            # 傳入 is_bollinger 參數決定是否繪製布林通道
+            fig = make_chart(item["hist"], f"{item['sid']} {item['name']}", is_bollinger=is_bollinger)
             st.plotly_chart(fig, use_container_width=True, key=f"c_{title}_{idx}_{item['sid']}")
 
 
 # ==============================================================================
 # 網頁介面 (Streamlit UI)
 # ==============================================================================
-st.title("台股精選訊號 v24.0（內含詳細中文說明與調整指南）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜保留 15 大經典名師與技術分析戰法")
+st.title("台股精選訊號 v26.0（阿水一式布林通道圖表修正版）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜阿水一式已修正為顯示布林軌道，衝突排序調整完畢")
 
 st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。")
 
@@ -940,7 +858,7 @@ with st.expander("策略總覽與勝率清單", expanded=True):
 | 買 | **朱家泓頭頭高底底高** | **57.8%**（頭頭高、底底高多頭結構 + 站上月線帶量） |
 | 買 | 施昇輝0050樂活KD | **56.5%**（KD<20超賣區 + 站上月線逢低佈局） |
 | 買 | 資金輪動主流強勢股 | **59.2%**（100MA與月線之上 + 接近新高 + 爆量） |
-| 買 | 阿水一式 | **53.5%**（布林壓縮 + 2倍均量 + 紅K突破上軌） |
+| 買 | **阿水一式** | **53.5%**（布林通道壓縮 + 2倍均量 + 紅K突破上軌） **[圖表已改為布林軌道]** |
 | 買 | 貫穿線 / 三內身 | **66.0% / 65.0%**（高勝率反轉 + 站上月線） |
 | 買 | 大K棒強力收回 | **68.0%**（突破恐慌陰線 + 站上月線） |
 | 買 | 三白兵 / 爆量三白兵 / 黏合晨星 | **48.8% / 45.7% / 46.3%** |
@@ -958,13 +876,13 @@ with col2:
         SYMBOL_CACHE.clear()
         st.rerun()
 
-if do_scan or "scan_results_v24" not in st.session_state:
+if do_scan or "scan_results_v26" not in st.session_state:
     with st.spinner("掃描中（載入 300 天歷史資料並執行 15 種名師戰法）..."):
-        st.session_state["scan_results_v24"] = run_full_scan()
+        st.session_state["scan_results_v26"] = run_full_scan()
     if do_scan:
         st.success("掃描完成")
 
-results = st.session_state.get("scan_results_v24", {})
+results = st.session_state.get("scan_results_v26", {})
 
 tabs = st.tabs([
     "衝突彙整",
@@ -986,7 +904,7 @@ tabs = st.tabs([
 ])
 
 with tabs[0]:
-    st.markdown("同一檔出現多個訊號時集中顯示。買賣相反會標衝突。")
+    st.markdown("同一檔出現多個訊號時集中顯示。買賣相反會標衝突（衝突「否」排序在前面）。")
     cdf = build_conflict_table(results)
     if cdf.empty:
         st.info("目前沒有跨訊號重疊個股。")
@@ -1002,7 +920,8 @@ with tabs[3]:
 with tabs[4]:
     render_signal_tab(results.get("資金輪動主流強勢股", []), "資金輪動主流強勢股", "歷史勝率 59.2%｜100MA與月線之上 + 接近新高 + 爆量")
 with tabs[5]:
-    render_signal_tab(results.get("阿水一式", []), "阿水一式（布林壓縮突破）", "歷史勝率 53.5%｜壓縮 + 2倍均量 + 紅K突破通道頂")
+    # 阿水一式分頁：設定 is_bollinger=True 顯示布林通道軌道
+    render_signal_tab(results.get("阿水一式", []), "阿水一式（布林通道壓縮突破）", "歷史勝率 53.5%｜壓縮 + 2倍均量 + 紅K突破通道頂", is_bollinger=True)
 with tabs[6]:
     render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "歷史勝率 66.0%｜高勝率反轉 + 站上月線")
 with tabs[7]:
