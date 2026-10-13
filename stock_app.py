@@ -23,7 +23,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v28.0")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v28.6")
 
 # 樣式調整
 st.markdown("""
@@ -68,7 +68,7 @@ MAIN_SHEET = {
 CONFIG = {
     "MIN_VOLUME": 500000,      # 最小成交量限制：預設 500,000 (500張)
     "MAX_HISTORY": 300,        # 拉長歷史資料天數至 300 天，支援 100MA 與多月波段型態
-    "BATCH_WORKERS": 30,       # 多執行緒平行處理數量
+    "BATCH_WORKERS": 20,       # 多執行緒平行處理數量
     "CACHE_TTL": 300,          # 資料快取時間（秒）
 }
 
@@ -967,13 +967,16 @@ with col3:
                 del st.session_state[k]
         st.rerun()
 
-if do_scan or force_candidates or "scan_results_v28" not in st.session_state:
+# 不在進網頁時自動掃描，避免 Streamlit Cloud 超時 / Yahoo 限流
+# 只有按下按鈕才執行
+if do_scan or force_candidates:
     with st.spinner("掃描中..."):
         st.session_state["scan_results_v28"] = run_full_scan(force_refresh_candidates=bool(force_candidates))
-    if do_scan or force_candidates:
-        st.success("掃描完成")
+    st.success("掃描完成")
 
 results = st.session_state.get("scan_results_v28", {})
+if not results:
+    st.info("請先按「強制更新候選名單」建立本週多頭股票，再按「掃描訊號」。")
 
 tabs = st.tabs([
     "衝突彙整",
