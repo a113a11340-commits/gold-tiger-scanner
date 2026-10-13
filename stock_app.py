@@ -4,12 +4,17 @@
 ================================================================================
 【版本更新說明 v28.6】
 1. 【效能優化】建立「週線+日線多頭」候選名單
-   - 週一（或強制刷新）才重新掃描全部股票建立名單
-   - 其他日子只對候選名單跑詳細策略 → API 請求大幅減少
+   - 本週第一次開啟（或跨週、或按強制更新）才重掃全部股票建立名單
+   - 同週內只要 session 還在，就只跑候選名單，不會從頭掃
 2. 完全移除「頂背離」賣出策略（本系統只做多）
 3. 所有做多策略都必須先通過週線多頭 + 日線多頭過濾
 4. 林恩如、資金輪動使用 Yahoo 官方週線
 5. 阿水一式維持 2.1 倍標準差 + 帶寬 <= 0.2
+
+【注意】
+- Streamlit 的 session_state 是「瀏覽器分頁」層級，關掉分頁再重開會視為新 session，
+  會重新建立一次候選名單（這是正常行為）。
+- 同週、同一分頁內重複整理/重新整理，不會重跑全部股票。
 
 【如何執行】
 1. 安裝必要套件：
@@ -927,6 +932,15 @@ def _today_is_monday():
     return time.localtime().tm_wday == 0   # 0 = Monday
 
 
+def _current_week_key():
+    """回傳本週的唯一識別（用該週週一的日期字串），用來判斷候選名單是否已是本週建立的"""
+    t = time.localtime()
+    # 計算本週週一的日期
+    days_since_monday = t.tm_wday          # 0=Mon ... 6=Sun
+    monday_ts = time.mktime(t) - days_since_monday * 86400
+    return time.strftime("%Y-%m-%d", time.localtime(monday_ts))
+
+
 def build_bullish_candidates(main_stocks):
     """
     掃描全部股票，找出符合「週線多頭 + 日線多頭」的候選名單。
@@ -985,23 +999,31 @@ def run_full_scan(force_refresh_candidates=False):
         return results
 
     # ---------- 決定是否更新候選名單 ----------
+    # 規則：
+    # 1. 強制更新 → 一定重建
+    # 2. session 裡沒有候選名單 → 重建（第一次開啟網頁）
+    # 3. 候選名單不是本週建立的 → 重建（跨週後第一次進來）
+    # 其他情況（同週內、session 還在）→ 直接用已有候選名單，不重跑全部股票
+    week_key = _current_week_key()
     need_update = (
         force_refresh_candidates
         or "bullish_candidates" not in st.session_state
-        or _today_is_monday()
-        or st.session_state.get("candidates_date") != time.strftime("%Y-%m-%d")
+        or st.session_state.get("candidates_week") != week_key
     )
 
     if need_update:
-        with st.spinner("正在更新「週線+日線多頭」候選名單（僅週一或強制刷新時執行）..."):
+        reason = "強制更新" if force_refresh_candidates else ("本週首次" if "bullish_candidates" not in st.session_state else "跨週更新")
+        with st.spinner(f"正在建立「週線+日線多頭」候選名單（{reason}）..."):
             candidates = build_bullish_candidates(main_stocks)
             st.session_state["bullish_candidates"] = candidates
-            st.session_state["candidates_date"] = time.strftime("%Y-%m-%d")
+            st.session_state["candidates_week"] = week_key
             st.session_state["candidates_count"] = len(candidates)
-        st.info(f"候選名單已更新：共 {len(candidates)} 檔符合週線+日線多頭")
+            st.session_state["candidates_built_at"] = time.strftime("%Y-%m-%d %H:%M")
+        st.info(f"候選名單已更新（{reason}）：共 {len(candidates)} 檔符合週線+日線多頭｜建立時間 {st.session_state['candidates_built_at']}")
     else:
         candidates = st.session_state.get("bullish_candidates", [])
-        st.caption(f"使用本週候選名單（共 {len(candidates)} 檔），僅週一會自動更新")
+        built_at = st.session_state.get("candidates_built_at", "未知")
+        st.caption(f"使用本週候選名單（共 {len(candidates)} 檔，建立於 {built_at}）｜同週內不會重掃全部股票")
 
     if not candidates:
         st.warning("目前沒有符合週線+日線多頭的股票。")
