@@ -1,26 +1,12 @@
 """
 ================================================================================
-台股精選訊號監控系統（Streamlit v28.1 阿水一式帶寬 <= 0.2 正統修正版）
+台股精選訊號監控系統（Streamlit v26.0 阿水一式布林通道圖表專用修正版）
 ================================================================================
-【版本更新說明 v28.1】
-1. 修正阿水一式帶寬計算可能因 None 值而報錯的問題（改為安全過濾）
-2. 強化 Google 試算表讀取失敗時的錯誤提示
-3. 全面加入繁體中文註解與「如何修改」指引，方便後續維護
-4. 保持原有 15 策略邏輯、勝率表、衝突彙整排序（衝突：否 在前）
-5. 布林通道仍採用 2.1 倍標準差（阿水正統設定）
-
-【如何執行】
-1. 安裝必要套件：
-   pip install streamlit pandas plotly numpy requests
-2. 執行指令：
-   streamlit run 台股精選訊號_v28.1_阿水一式修正版.py
-3. 瀏覽器會自動開啟網頁介面
-
-【重要可修改參數位置】
-- CONFIG 字典：最小成交量、歷史天數、平行執行緒數、快取時間
-- MAIN_SHEET：更換股票清單的 Google 試算表網址
-- WINRATE：各策略歷史勝率顯示文字
-- SIGNAL_KEYS 與 mapping：新增或移除策略
+【更新說明】
+- 修正「阿水一式」策略的詳細K線圖：自動繪製布林通道（上軌、中軌MA20、下軌），
+  讓您能直覺觀察布林通道壓縮與帶量突破上軌的型態。
+- 衝突彙整排序保持「衝突：否」在前、「衝突：是」在後。
+- 完整保留 15 大經典名師與技術分析戰法。
 ================================================================================
 """
 
@@ -34,12 +20,10 @@ import numpy as np
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
-# ==============================================================================
 # 頁面基本設定
-# ==============================================================================
-st.set_page_config(layout="wide", page_title="台股精選訊號 v28.1")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v26.0")
 
-# 樣式調整（字體加大、紅買綠賣）
+# 樣式調整
 st.markdown("""
 <style>
 .block-container { padding-top: 1rem; padding-bottom: 1rem; }
@@ -54,10 +38,7 @@ td { font-size: 16px !important; font-weight: bold !important;
 </style>
 """, unsafe_allow_html=True)
 
-# ==============================================================================
-# 【可修改區】15 策略勝率對照表
-# 說明：這裡只是顯示用文字，不影響實際計算。若要更新勝率數字，直接改字串即可。
-# ==============================================================================
+# 【保留之 15 策略勝率對照表】
 WINRATE = {
     "林恩如20週均線W底": "58.5%",
     "朱家泓頭頭高底底高": "57.8%",
@@ -76,46 +57,28 @@ WINRATE = {
     "頂背離": "54.4%",
 }
 
-# ==============================================================================
-# 【可修改區】雲端股票清單來源
-# 說明：請把 Google 試算表設為「任何人擁有連結者皆可檢視」，
-#       然後把完整網址貼到 base，gid 通常是 0（第一個工作表）。
-# 修改方式：更換 base 與 gid 即可換成自己的清單。
-# 清單格式要求：第一欄為股票代號（如 2330），第二欄為股票名稱。
-# ==============================================================================
+# 雲端清單來源設定
 MAIN_SHEET = {
     "base": "https://docs.google.com/spreadsheets/d/13Mv-7uaFyR1KcxNRVrhxCGAAntElKprB7ZeWWBxS3n0",
     "gid": "0",
 }
 
-# ==============================================================================
-# 【可修改區】系統全域設定
-# 說明：這是最常用的調整位置。
-# MIN_VOLUME   : 最小成交量（單位：股），預設 50 萬股 = 500 張
-# MAX_HISTORY  : 抓取歷史資料天數，建議 250~300 天（支援 100MA）
-# BATCH_WORKERS: 同時抓資料的執行緒數，網路慢可調低到 10
-# CACHE_TTL    : 資料快取秒數，避免反覆打 Yahoo
-# ==============================================================================
+# 系統全域設定
 CONFIG = {
-    "MIN_VOLUME": 500000,      # 最小成交量限制：預設 500,000（500張）
+    "MIN_VOLUME": 500000,      # 最小成交量限制：預設 500,000 (500張)
     "MAX_HISTORY": 300,        # 拉長歷史資料天數至 300 天，支援 100MA 與多月波段型態
     "BATCH_WORKERS": 200,       # 多執行緒平行處理數量
     "CACHE_TTL": 300,          # 資料快取時間（秒）
 }
 
-# HTTP 連線池設定（提高穩定性）
 HTTP_SESSION = requests.Session()
 adapter = requests.adapters.HTTPAdapter(pool_connections=30, pool_maxsize=30)
 HTTP_SESSION.mount("https://", adapter)
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-SYMBOL_CACHE = {}   # 快取股票是 .TW 還是 .TWO
+SYMBOL_CACHE = {}
 
 
-# ==============================================================================
-# 技術指標計算函數（共用）
-# ==============================================================================
 def calc_ma_list(closes, period):
-    """計算簡單移動平均線，回傳與 closes 等長的 list（前面為 None）"""
     ma = [None] * len(closes)
     for i in range(period - 1, len(closes)):
         ma[i] = sum(closes[i - period + 1:i + 1]) / period
@@ -123,7 +86,6 @@ def calc_ma_list(closes, period):
 
 
 def calc_rsi(closes, period=14):
-    """計算 RSI（Wilder 平滑法）"""
     n = len(closes)
     rsi = [None] * n
     if n < period + 1:
@@ -149,7 +111,6 @@ def calc_rsi(closes, period=14):
 
 
 def calc_kd(highs, lows, closes, n=9):
-    """計算 KD 指標（RSV → K → D）"""
     length = len(closes)
     k_list = [None] * length
     d_list = [None] * length
@@ -170,14 +131,6 @@ def calc_kd(highs, lows, closes, n=9):
 
 
 def calc_bollinger_bands(closes, period=20, num_std=2.0):
-    """
-    計算布林通道
-    參數：
-        period   : 中軌週期（預設 20）
-        num_std  : 標準差倍數（阿水一式使用 2.1）
-    回傳：ma, upper, lower, bandwidth
-    bandwidth = (上軌 - 下軌) / 中軌
-    """
     n = len(closes)
     ma = calc_ma_list(closes, period)
     upper = [None] * n
@@ -186,7 +139,7 @@ def calc_bollinger_bands(closes, period=20, num_std=2.0):
     for i in range(period - 1, n):
         window = closes[i - period + 1 : i + 1]
         m = ma[i]
-        std = np.std(window)          # 預設為母體標準差（ddof=0）
+        std = np.std(window)
         u = m + num_std * std
         l = m - num_std * std
         upper[i] = u
@@ -195,15 +148,7 @@ def calc_bollinger_bands(closes, period=20, num_std=2.0):
     return ma, upper, lower, bandwidth
 
 
-# ==============================================================================
-# 資料抓取相關函數
-# ==============================================================================
 def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"]):
-    """
-    從 Yahoo Finance 抓取台股日線資料
-    優先使用快取的後綴（.TW 或 .TWO），失敗則嘗試另一個。
-    回傳 dict 包含 closes, highs, lows, opens, vols, dates
-    """
     if sid in SYMBOL_CACHE:
         suffixes = [SYMBOL_CACHE[sid]]
     else:
@@ -234,7 +179,7 @@ def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"]):
                         t_dates.append(time.strftime("%Y-%m-%d", time.localtime(timestamps[i])))
                     else:
                         t_dates.append("")
-            if len(t_cls) < 150:          # 資料太少就跳過
+            if len(t_cls) < 150:
                 continue
             SYMBOL_CACHE[sid] = sfx
             if len(t_cls) > max_n:
@@ -255,7 +200,6 @@ def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"]):
 
 @st.cache_data(ttl=CONFIG["CACHE_TTL"])
 def fetch_sheet_csv(base_url, gid):
-    """從 Google 試算表匯出 CSV（有快取）"""
     csv_url = f"{base_url}/export?format=csv&gid={gid}"
     res = HTTP_SESSION.get(csv_url, timeout=15)
     res.encoding = "utf-8"
@@ -263,10 +207,6 @@ def fetch_sheet_csv(base_url, gid):
 
 
 def load_main_stocks():
-    """
-    載入主要股票清單
-    修改方式：若想改成讀取本機 CSV，可在此改寫邏輯。
-    """
     tasks = []
     try:
         csv_text = fetch_sheet_csv(MAIN_SHEET["base"], MAIN_SHEET["gid"])
@@ -278,7 +218,6 @@ def load_main_stocks():
             if pd.isna(sid_raw):
                 continue
             sid = str(sid_raw).strip()
-            # 簡單過濾非數字代號
             if not sid.replace(".", "").replace("-", "").isdigit() or len(sid) < 4:
                 continue
             sid = str(int(float(sid))) if "." in sid else sid
@@ -286,15 +225,10 @@ def load_main_stocks():
             tasks.append({"sid": sid, "name": name, "sheet": "主要清單", "short_n": 20, "long_n": 100})
     except Exception as e:
         st.error(f"讀取主要股票清單失敗: {e}")
-        st.warning(
-            "請確認 Google 試算表已設為「任何人擁有連結者皆可檢視」，"
-            "或到程式碼 MAIN_SHEET 區更換正確的網址。"
-        )
     return tasks
 
 
 def _pack(sid, name, sheet, hist, price, signal, direction, entry, stop, target, how, side, wr):
-    """把策略結果打包成統一格式"""
     return {
         "sid": sid, "name": name, "sheet": sheet, "hist": hist,
         "price": price, "signal": f"{signal}｜勝率{wr}", "direction": direction,
@@ -306,11 +240,8 @@ def _pack(sid, name, sheet, hist, price, signal, direction, entry, stop, target,
 
 # ==============================================================================
 # 15 大策略函數定義
-# 說明：每個函數接收 hist（歷史資料 dict），符合條件則回傳結果 dict，否則回傳 None。
-# 修改方式：想調整條件就改對應的 if 判斷即可。
 # ==============================================================================
 def analyze_lin_20w_w_bottom(hist):
-    """林恩如 20 週均線 W 底"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 150 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -336,7 +267,6 @@ def analyze_lin_20w_w_bottom(hist):
 
 
 def analyze_chujiahung_bottom(hist):
-    """朱家泓 頭頭高底底高"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 100 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -365,7 +295,6 @@ def analyze_chujiahung_bottom(hist):
 
 
 def analyze_shishenghui_kd(hist):
-    """施昇輝 0050 樂活 KD"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -388,7 +317,6 @@ def analyze_shishenghui_kd(hist):
 
 
 def analyze_lin_sector_rotation(hist):
-    """資金輪動主流強勢股"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 100 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -413,55 +341,28 @@ def analyze_lin_sector_rotation(hist):
     }
 
 
-# ==============================================================================
-# 【阿水一式】嚴格採用：2.1倍標準差 + 帶寬 <= 0.2 + 成交量 >= 2倍均量
-# 修改重點：
-# 1. 帶寬改為安全過濾 None 後再取 min（避免計算錯誤）
-# 2. 條件維持正統：近 10 日內出現過帶寬 <= 0.2
-# 3. 成交量 >= 前 5 日均量的 2 倍
-# 4. 紅 K 且接近或突破 2.1 倍上軌
-# ==============================================================================
 def analyze_ashui_1(hist):
-    """阿水一式（帶寬壓縮突破）"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
-
-    # 阿水正統 2.1 倍標準差
-    ma20, upper, lower, bandwidth = calc_bollinger_bands(closes, period=20, num_std=2.1)
-    if None in (ma20[-1], upper[-1], bandwidth[-1]):
+    ma20, upper, lower, bandwidth = calc_bollinger_bands(closes, period=20, num_std=2.0)
+    if None in (ma20[-1], upper[-1], bandwidth[-1], bandwidth[-5]):
         return None
-
-    # 【修正】安全過濾 None，避免 min() 出錯
-    recent_bw = [b for b in bandwidth[-10:] if b is not None]
-    if not recent_bw:
+    if not (min(bandwidth[-10:]) < (sum(bandwidth[-60:]) / 60) * 0.85 and vols[-1] >= (sum(vols[-6:-1])/5) * 2.0 and closes[-1] > opens[-1] and closes[-1] >= upper[-1] * 0.995):
         return None
-    is_compressed = min(recent_bw) <= 0.2
-
-    # 當日成交量 >= 前 5 日均量的 2 倍
-    avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
-    is_volume_surge = avg5_vol > 0 and vols[-1] >= avg5_vol * 2.0
-
-    # 紅 K 且接近或突破上軌（允許 0.5% 誤差）
-    is_break_upper = closes[-1] > opens[-1] and closes[-1] >= upper[-1] * 0.995
-
-    if not (is_compressed and is_volume_surge and is_break_upper):
-        return None
-
     return {
-        "signal": f"阿水一式：帶寬壓縮({bandwidth[-1]:.2f}≤0.2)+2倍均量突破2.1倍上軌",
+        "signal": "阿水一式：布林通道壓縮後帶量突破上軌",
         "direction": "買進", "side": "long", "winrate": WINRATE["阿水一式"],
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
         "target": round(closes[-1] * 1.10, 2),
-        "how": "帶寬<=0.2壓縮+2倍均量+紅K突破上軌",
+        "how": "壓縮+帶量+紅K突破通道頂",
         "price": closes[-1],
     }
 
 
 def analyze_piercing_line(hist):
-    """貫穿線"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -485,7 +386,6 @@ def analyze_piercing_line(hist):
 
 
 def analyze_three_inside_up(hist):
-    """三內身"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -509,7 +409,6 @@ def analyze_three_inside_up(hist):
 
 
 def analyze_power_candle_recovery(hist):
-    """大K棒強力收回"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -542,7 +441,6 @@ def analyze_power_candle_recovery(hist):
 
 
 def analyze_bull_sanbaibing(hist, require_volume_surge=False):
-    """三白兵 / 爆量三白兵"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -575,7 +473,6 @@ def analyze_bull_sanbaibing(hist, require_volume_surge=False):
 
 
 def analyze_bull_sticky_morning(hist):
-    """黏合晨星"""
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -601,7 +498,6 @@ def analyze_bull_sticky_morning(hist):
 
 
 def analyze_break_bottom_flip(hist):
-    """破底翻"""
     closes, highs, lows, vols = hist["closes"], hist["highs"], hist["lows"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < 800000:
@@ -624,7 +520,6 @@ def analyze_break_bottom_flip(hist):
 
 
 def analyze_rsi_passivation(hist):
-    """RSI 鈍化"""
     closes, vols = hist["closes"], hist["vols"]
     n = len(closes)
     if n < 40 or vols[-1] < CONFIG["MIN_VOLUME"]:
@@ -650,7 +545,6 @@ def analyze_rsi_passivation(hist):
 
 
 def _swing_indices(values, order=3, find_min=True):
-    """找出局部高低點索引"""
     out = []
     n = len(values)
     for i in range(order, n - order):
@@ -665,7 +559,6 @@ def _swing_indices(values, order=3, find_min=True):
 
 
 def _div_pairs_for_period(closes, lows, highs, rsi, look, bull=True):
-    """尋找背離配對"""
     n = len(closes)
     base = n - look
     if bull:
@@ -684,7 +577,6 @@ def _div_pairs_for_period(closes, lows, highs, rsi, look, bull=True):
 
 
 def _best_div(closes, lows, highs, bull=True):
-    """找出最佳背離（一次或二度）"""
     n = len(closes)
     look = min(80, n - 1)
     near = n - 8
@@ -716,7 +608,6 @@ def _best_div(closes, lows, highs, bull=True):
 
 
 def analyze_bull_divergence(hist):
-    """多頭背離"""
     closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
     if len(closes) < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
@@ -736,7 +627,6 @@ def analyze_bull_divergence(hist):
 
 
 def analyze_top_divergence(hist):
-    """頂背離（唯一賣出訊號）"""
     closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
     if len(closes) < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
@@ -754,7 +644,7 @@ def analyze_top_divergence(hist):
 
 
 # ==============================================================================
-# 策略鍵值對映清單（新增策略時記得同步修改這裡）
+# 保留之 15 種策略鍵值對映清單
 # ==============================================================================
 SIGNAL_KEYS = [
     "林恩如20週均線W底", "朱家泓頭頭高底底高", "施昇輝0050樂活KD", "資金輪動主流強勢股",
@@ -764,7 +654,6 @@ SIGNAL_KEYS = [
 
 
 def run_full_scan():
-    """執行全部 15 策略掃描"""
     results = {k: [] for k in SIGNAL_KEYS}
 
     def add(key, item, r):
@@ -777,9 +666,6 @@ def run_full_scan():
         ))
 
     main_stocks = load_main_stocks()
-    if not main_stocks:
-        st.warning("目前沒有任何股票可掃描，請檢查 Google 試算表設定。")
-        return results
 
     def process_main(item):
         hist = get_yahoo_history(item["sid"])
@@ -797,7 +683,7 @@ def run_full_scan():
             ("三內身", analyze_three_inside_up),
             ("大K棒收回", analyze_power_candle_recovery),
             ("三白兵", lambda h: analyze_bull_sanbaibing(h, False)),
-            ("爆量三白兵", lambda h: analyze_bull_sanbaibing(h, True)),
+            ("爆量3白兵", lambda h: analyze_bull_sanbaibing(h, True)),
             ("黏合晨星", analyze_bull_sticky_morning),
             ("破底翻", analyze_break_bottom_flip),
             ("RSI鈍化", analyze_rsi_passivation),
@@ -821,7 +707,6 @@ def run_full_scan():
 
 
 def build_conflict_table(results):
-    """建立衝突彙整表（衝突：否 排在前面）"""
     by_sid = {}
     for key, items in results.items():
         for d in items:
@@ -847,7 +732,7 @@ def build_conflict_table(results):
 
 
 # ==============================================================================
-# 圖表繪製函數（阿水一式採用 2.1 倍布林軌道）
+# 圖表繪製函數 (支援針對「阿水一式」顯示布林通道軌道)
 # ==============================================================================
 def make_chart(hist, title, is_bollinger=False):
     closes = hist["closes"][-100:]
@@ -856,7 +741,7 @@ def make_chart(hist, title, is_bollinger=False):
     lows = hist["lows"][-100:]
     vols = hist["vols"][-100:]
     x = list(range(len(closes)))
-
+    
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
     fig.add_trace(go.Candlestick(
         x=x, open=opens, high=highs, low=lows, close=closes,
@@ -864,25 +749,25 @@ def make_chart(hist, title, is_bollinger=False):
         decreasing_line_color="#00A600", decreasing_fillcolor="#00A600",
         line_width=1.5, name="K線"
     ), row=1, col=1)
-
+    
     if is_bollinger:
-        # 阿水一式專用：使用 2.1 倍標準差繪製布林通道
-        _, upper_all, lower_all, _ = calc_bollinger_bands(hist["closes"], period=20, num_std=2.1)
+        # 阿水一式專用：繪製布林通道（上軌、中軌MA20、下軌）
+        _, upper_all, lower_all, _ = calc_bollinger_bands(hist["closes"], period=20, num_std=2.0)
         ma20_all = calc_ma_list(hist["closes"], 20)
         upper = upper_all[-100:]
         lower = lower_all[-100:]
         ma20 = ma20_all[-100:]
-
-        fig.add_trace(go.Scatter(x=x, y=upper, mode="lines", name="布林上軌(2.1σ)", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
+        
+        fig.add_trace(go.Scatter(x=x, y=upper, mode="lines", name="布林上軌", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="布林中軌(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌(2.1σ)", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
     else:
-        # 其他策略：顯示月線與 100MA
+        # 其他策略：維持顯示月線與 100MA
         ma20 = calc_ma_list(hist["closes"], 20)[-100:]
         ma100 = calc_ma_list(hist["closes"], 100)[-100:]
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="月線(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=ma100, mode="lines", name="100MA(20週)", line=dict(color="#FF4500", width=2)), row=1, col=1)
-
+        
     colors = ["#FF3333" if closes[i] >= opens[i] else "#00A600" for i in range(len(closes))]
     fig.add_trace(go.Bar(x=x, y=vols, marker_color=colors, name="量"), row=2, col=1)
     fig.update_layout(title=title, xaxis_rangeslider_visible=False,
@@ -894,7 +779,6 @@ def make_chart(hist, title, is_bollinger=False):
 
 
 def direction_html(direction: str) -> str:
-    """方向文字加上顏色"""
     d = direction or ""
     if "賣" in d or "減碼" in d:
         return f'<span class="sell-text">{d}</span>'
@@ -904,7 +788,6 @@ def direction_html(direction: str) -> str:
 
 
 def render_signal_tab(data_list, title, note="", is_bollinger=False):
-    """渲染單一策略分頁"""
     st.markdown(f"**{title}**")
     if note:
         st.caption(note)
@@ -954,6 +837,7 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
                 f"停損 **{item.get('stop','-')}**｜目標 **{item.get('target','-')}**｜"
                 f"量 **{item.get('lots',0)}張**"
             )
+            # 傳入 is_bollinger 參數決定是否繪製布林通道
             fig = make_chart(item["hist"], f"{item['sid']} {item['name']}", is_bollinger=is_bollinger)
             st.plotly_chart(fig, use_container_width=True, key=f"c_{title}_{idx}_{item['sid']}")
 
@@ -961,8 +845,8 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
 # ==============================================================================
 # 網頁介面 (Streamlit UI)
 # ==============================================================================
-st.title("台股精選訊號 v28.1（阿水一式帶寬<=0.2 正統修正版）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜阿水一式帶寬已嚴格設定為 <= 0.2（已修正 None 過濾）")
+st.title("台股精選訊號 v26.0（阿水一式布林通道圖表修正版）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜阿水一式已修正為顯示布林軌道，衝突排序調整完畢")
 
 st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。")
 
@@ -974,7 +858,7 @@ with st.expander("策略總覽與勝率清單", expanded=True):
 | 買 | **朱家泓頭頭高底底高** | **57.8%**（頭頭高、底底高多頭結構 + 站上月線帶量） |
 | 買 | 施昇輝0050樂活KD | **56.5%**（KD<20超賣區 + 站上月線逢低佈局） |
 | 買 | 資金輪動主流強勢股 | **59.2%**（100MA與月線之上 + 接近新高 + 爆量） |
-| 買 | **阿水一式** | **53.5%**（2.1倍布林帶寬<=0.2壓縮 + 2倍均量 + 紅K突破上軌） **[正統帶寬<=0.2邏輯]** |
+| 買 | **阿水一式** | **53.5%**（布林通道壓縮 + 2倍均量 + 紅K突破上軌） **[圖表已改為布林軌道]** |
 | 買 | 貫穿線 / 三內身 | **66.0% / 65.0%**（高勝率反轉 + 站上月線） |
 | 買 | 大K棒強力收回 | **68.0%**（突破恐慌陰線 + 站上月線） |
 | 買 | 三白兵 / 爆量三白兵 / 黏合晨星 | **48.8% / 45.7% / 46.3%** |
@@ -992,13 +876,13 @@ with col2:
         SYMBOL_CACHE.clear()
         st.rerun()
 
-if do_scan or "scan_results_v28" not in st.session_state:
+if do_scan or "scan_results_v26" not in st.session_state:
     with st.spinner("掃描中（載入 300 天歷史資料並執行 15 種名師戰法）..."):
-        st.session_state["scan_results_v28"] = run_full_scan()
+        st.session_state["scan_results_v26"] = run_full_scan()
     if do_scan:
         st.success("掃描完成")
 
-results = st.session_state.get("scan_results_v28", {})
+results = st.session_state.get("scan_results_v26", {})
 
 tabs = st.tabs([
     "衝突彙整",
@@ -1036,7 +920,8 @@ with tabs[3]:
 with tabs[4]:
     render_signal_tab(results.get("資金輪動主流強勢股", []), "資金輪動主流強勢股", "歷史勝率 59.2%｜100MA與月線之上 + 接近新高 + 爆量")
 with tabs[5]:
-    render_signal_tab(results.get("阿水一式", []), "阿水一式（帶寬<=0.2壓縮突破）", "歷史勝率 53.5%｜2.1倍帶寬<=0.2 + 2倍均量 + 紅K突破上軌", is_bollinger=True)
+    # 阿水一式分頁：設定 is_bollinger=True 顯示布林通道軌道
+    render_signal_tab(results.get("阿水一式", []), "阿水一式（布林通道壓縮突破）", "歷史勝率 53.5%｜壓縮 + 2倍均量 + 紅K突破通道頂", is_bollinger=True)
 with tabs[6]:
     render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "歷史勝率 66.0%｜高勝率反轉 + 站上月線")
 with tabs[7]:
@@ -1060,4 +945,3 @@ with tabs[15]:
 
 st.markdown("---")
 st.caption("僅供學習監控。投資有風險，請獨立判斷並自負盈虧。")
-""")
