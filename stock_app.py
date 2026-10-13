@@ -99,7 +99,7 @@ MAIN_SHEET = {
 CONFIG = {
     "MIN_VOLUME": 500000,      # 最小成交量限制：預設 500,000（500張）
     "MAX_HISTORY": 300,        # 拉長歷史資料天數至 300 天，支援 100MA 與多月波段型態
-    "BATCH_WORKERS": 20,       # 多執行緒平行處理數量
+    "BATCH_WORKERS": 200,       # 多執行緒平行處理數量
     "CACHE_TTL": 300,          # 資料快取時間（秒）
 }
 
