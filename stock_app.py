@@ -1,5 +1,7 @@
 # ==============================================================================
-# 台股精選訊號監控系統（Streamlit v28.6 候選名單優化 + 朱家泓戰法重構版）
+# 台股精選訊號監控系統（Streamlit v28.7 朱家泓戰法細膩重構版）
+# 修改重點：朱家泓頭頭高底底高 → 加入位階（第幾波近似）、回後買上漲判斷、
+#           四線多排、收盤站上5MA + 突破昨高、健康量價、紀律停損說明
 # ==============================================================================
 import streamlit as st
 import pandas as pd
@@ -12,7 +14,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v28.6")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v28.7")
 
 # 樣式調整
 st.markdown("""
@@ -300,64 +302,142 @@ def analyze_lin_20w_w_bottom(hist):
 
 def analyze_chujiahung_bottom(hist):
     """
-    朱家泓頭頭高、底底高戰法（實戰重構版）
-    結合：均線多頭排列且向上斜率 + 波段 Swing 轉折點頭頭高底底高 + 帶量紅K攻擊訊號
+    朱家泓頭頭高、底底高戰法（細膩重構版 v28.7）
+    對應公開教學六大要點：
+    1. 趨勢：頭頭高、底底高
+    2. 均線：5>10>20>60 多排 + 月線/季線向上
+    3. 位階：近似判斷第幾波（初升段優先，避開明顯高檔）
+    4. 訊號：收盤紅K + 站上5MA + 最好突破昨高（回後買上漲）
+    5. 量價：溫和放大（健康結構），避開極端高檔爆量
+    6. 紀律：停損守最近低點或約5%
+
+    訊號會標註：位階（第幾波近似）、買點類型（回後買上漲 / 突破確認 / 其他）
+    注意：位階為程式近似，非精準「第幾波」；歷史勝率為樣本，未扣成本，不構成投資建議。
     """
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 120 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
-    
-    # 1. 均線條件：月線(MA20)與季線(MA60)必須多頭排列且向上翻揚
+
+    # ---------- 1. 均線架構：四線多排 + 方向向上 ----------
+    ma5  = calc_ma_list(closes, 5)
+    ma10 = calc_ma_list(closes, 10)
     ma20 = calc_ma_list(closes, 20)
     ma60 = calc_ma_list(closes, 60)
-    if None in (ma20[-1], ma20[-2], ma60[-1], ma60[-2]):
+    if any(x is None for x in (ma5[-1], ma5[-2], ma10[-1], ma20[-1], ma20[-2], ma60[-1], ma60[-2])):
         return None
-    
-    # 檢查均線是否向上走揚且 MA20 > MA60
-    is_ma_bullish = (ma20[-1] > ma20[-2]) and (ma60[-1] > ma60[-2]) and (ma20[-1] > ma60[-1])
-    if not is_ma_bullish or closes[-1] <= ma20[-1]:
+
+    is_ma_aligned = (ma5[-1] > ma10[-1] > ma20[-1] > ma60[-1])
+    is_ma_up = (ma20[-1] > ma20[-2]) and (ma60[-1] > ma60[-2])
+    if not (is_ma_aligned and is_ma_up and closes[-1] > ma20[-1]):
         return None
-    
-    # 2. 波段轉折點（Swing Pivots）確認「頭頭高、底底高」
+
+    # ---------- 2. 波段結構：嚴格頭頭高、底底高 ----------
     look = 90
-    low_swings = _swing_indices(lows[-look:], order=4, find_min=True)
+    low_swings  = _swing_indices(lows[-look:],  order=4, find_min=True)
     high_swings = _swing_indices(highs[-look:], order=4, find_min=False)
-    
     base_idx = n - look
-    abs_low_swings = [base_idx + i for i in low_swings]
+    abs_low_swings  = [base_idx + i for i in low_swings]
     abs_high_swings = [base_idx + i for i in high_swings]
-    
     if len(abs_low_swings) < 2 or len(abs_high_swings) < 2:
         return None
-        
+
     l1, l2 = lows[abs_low_swings[-2]], lows[abs_low_swings[-1]]
     h1, h2 = highs[abs_high_swings[-2]], highs[abs_high_swings[-1]]
-    
-    # 嚴格確認波段結構：底底高 (l2 > l1) 且 頭頭高 (h2 > h1)
     if not (l2 > l1 and h2 > h1):
         return None
-        
-    # 3. 攻擊訊號與量價配合：帶量紅K突破
-    avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
-    is_volume_surge = avg5_vol > 0 and vols[-1] >= avg5_vol * 1.3
-    is_bullish_candle = closes[-1] > opens[-1]
-    
-    # 避開高檔末升段：必須接近或突破近期高點
-    recent_high_60 = max(highs[-60:-1])
-    is_breakout_or_strong = closes[-1] >= recent_high_60 * 0.98
-    
-    if not (is_volume_surge and is_bullish_candle and is_breakout_or_strong):
+
+    # ---------- 3. 位階近似判斷（第幾波） ----------
+    # 以距離近期主要低點的漲幅粗略分級（無法精準判斷波浪，僅供參考）
+    recent_low_60 = min(lows[-60:]) if n >= 60 else min(lows)
+    gain_from_low = (closes[-1] / recent_low_60 - 1.0) if recent_low_60 > 0 else 0.0
+    long_term_high = max(highs[-120:]) if n >= 120 else max(highs)
+    near_long_high = closes[-1] >= long_term_high * 0.95
+
+    if gain_from_low <= 0.20:
+        wave_label = "第1波（初升段近似）"
+        wave_risk = "低"
+    elif gain_from_low <= 0.40:
+        wave_label = "第2波（主升段近似）"
+        wave_risk = "中"
+    elif gain_from_low <= 0.60:
+        wave_label = "第3波（較高位階）"
+        wave_risk = "中高"
+    else:
+        wave_label = "第3波以上／高檔（近似）"
+        wave_risk = "高"
+
+    # 明顯高檔直接過濾（降低末升段陷阱）
+    if gain_from_low > 0.55 or near_long_high:
         return None
-        
+
+    # ---------- 4. 進場訊號細節：判斷買點類型 ----------
+    avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
+    is_volume_ok = avg5_vol > 0 and vols[-1] >= avg5_vol * 1.2          # 溫和放大（健康價量）
+    is_bullish_candle = closes[-1] > opens[-1]
+    is_above_ma5 = closes[-1] > ma5[-1]
+    is_break_prev_high = closes[-1] > highs[-2]                         # 突破昨高
+    recent_high_30 = max(highs[-30:-1]) if n > 30 else max(highs[:-1])
+    is_near_or_break_high = closes[-1] >= recent_high_30 * 0.97
+
+    # 判斷是否「回後買上漲」特徵：
+    # 最近幾日曾回檔（有低點），今日收盤重新站上5MA + 突破昨高 + 紅K
+    recent_pullback = False
+    if n >= 8:
+        # 過去 3~7 日內有低於5MA 或出現較明顯回檔
+        for i in range(-7, -1):
+            if closes[i] < ma5[i] if ma5[i] is not None else False:
+                recent_pullback = True
+                break
+            if lows[i] < min(lows[-8:-3]) * 0.99:
+                recent_pullback = True
+                break
+
+    buy_type = "一般突破確認"
+    if recent_pullback and is_above_ma5 and is_break_prev_high and is_bullish_candle:
+        buy_type = "回後買上漲（優先）"
+    elif is_above_ma5 and is_break_prev_high and is_bullish_candle:
+        buy_type = "突破昨高＋站上5MA"
+    elif is_above_ma5 and is_bullish_candle:
+        buy_type = "站上5MA轉強"
+
+    if not (is_volume_ok and is_bullish_candle and is_above_ma5 and is_near_or_break_high):
+        return None
+
+    # ---------- 5. 停損與目標（紀律） ----------
+    # 優先：進場日低點、最近波段低點(l2)、或約5%虧損
+    stop_price = min(lows[-1], l2, closes[-1] * 0.95)
+    target_price = round(closes[-1] * 1.12, 2)
+
+    # 組合訊號文字（細膩描述）
+    signal_text = (
+        f"朱家泓頭頭高底底高｜{wave_label}｜{buy_type}｜"
+        f"四線多排向上＋收盤站上5MA帶量"
+    )
+
+    how_text = (
+        f"【位階】{wave_label}（風險{wave_risk}，程式近似，需人工確認）｜"
+        f"【買點】{buy_type}｜"
+        f"【結構】頭頭高底底高確認多頭｜5>10>20>60多排且月季線向上｜"
+        f"收盤紅K站上5MA（最好突破昨高）＋量能溫和放大｜"
+        f"【停損】進場日低點或最近低點(l2)或約5%；短線收盤跌破5MA減碼／出場｜"
+        f"【心法】買進前多確認、賣出時守紀律。非保證獲利。"
+    )
+
     return {
-        "signal": "朱家泓頭頭高底底高：均線多排向上+波段頭頭高底底高+帶量突破",
-        "direction": "買進", "side": "long", "winrate": WINRATE["朱家泓頭頭高底底高"],
+        "signal": signal_text,
+        "direction": "買進",
+        "side": "long",
+        "winrate": WINRATE["朱家泓頭頭高底底高"],
         "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1], l2, ma20[-1] * 0.98), 2),
-        "target": round(closes[-1] * 1.15, 2),
-        "how": "朱家泓6字訣：多頭趨勢確立（頭頭高、底底高），月季線向上，帶量紅K突破進場，停損守最近低點(l2)或月線下。",
+        "stop": round(stop_price, 2),
+        "target": target_price,
+        "how": how_text,
         "price": closes[-1],
+        # 額外欄位方便後續擴充顯示
+        "wave_label": wave_label,
+        "buy_type": buy_type,
+        "wave_risk": wave_risk,
     }
 
 
@@ -929,17 +1009,17 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
 # ==============================================================================
 # UI 主介面設定
 # ==============================================================================
-st.title("台股精選訊號 v28.6（朱家泓戰法重構版）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜本週候選名單優化｜朱家泓頭頭高底底高邏輯修正")
+st.title("台股精選訊號 v28.7（朱家泓戰法細膩重構版）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜本週候選名單優化｜朱家泓訊號加入「第幾波近似＋回後買上漲」判斷")
 
-st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。")
+st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。位階（第幾波）為程式近似，實戰請人工確認。")
 
 with st.expander("策略總覽與勝率清單", expanded=True):
     st.markdown("""
 | 方向 | 訊號名稱 | 核心邏輯 / 參考勝率 |
 |------|----------|---------------------|
 | 買 | **林恩如20週均線W底** | **58.5%**（站上100MA與月線 + W底不再破底 + 帶量） |
-| 買 | **朱家泓頭頭高底底高** | **57.8%**（月季線向上 + 波段頭頭高底底高 + 帶量攻擊） |
+| 買 | **朱家泓頭頭高底底高** | **57.8%**（四線多排向上 + 頭頭高底底高 + 位階近似 + 回後買上漲／站上5MA帶量） |
 | 買 | 施昇輝0050樂活KD | **56.5%**（KD<20超賣區 + 站上月線逢低佈局） |
 | 買 | 資金輪動主流強勢股 | **59.2%**（100MA與月線之上 + 接近新高 + 爆量） |
 | 買 | **阿水一式** | **53.5%** (2.1倍布林帶寬<=0.2壓縮 + 2倍均量 + 紅K突破上軌) |
@@ -1005,7 +1085,11 @@ with tabs[0]:
 with tabs[1]:
     render_signal_tab(results.get("林恩如20週均線W底", []), "林恩如 20 週均線 W 底戰法", "歷史勝率 58.5%｜站上 100MA 與月線 + W 底不再破底 + 帶量")
 with tabs[2]:
-    render_signal_tab(results.get("朱家泓頭頭高底底高", []), "朱家泓頭頭高底底高戰法", "歷史勝率 57.8%｜月季線向上 + 波段頭頭高底底高 + 帶量攻擊")
+    render_signal_tab(
+        results.get("朱家泓頭頭高底底高", []),
+        "朱家泓頭頭高底底高戰法（細膩版）",
+        "歷史勝率 57.8%｜四線多排向上 + 頭頭高底底高 + 位階近似（第幾波）+ 回後買上漲／站上5MA帶量｜訊號會標註買點類型與位階風險"
+    )
 with tabs[3]:
     render_signal_tab(results.get("施昇輝0050樂活KD", []), "施昇輝 0050 樂活 KD 戰法", "歷史勝率 56.5%｜KD 雙雙跌破 20 低檔超賣區 + 站上月線")
 with tabs[4]:
@@ -1032,4 +1116,4 @@ with tabs[14]:
     render_signal_tab(results.get("多頭背離", []), "一次／二度多頭背離", "RSI(5) 與 RSI(10) 檢查｜歷史底背離約 43.4%")
 
 st.markdown("---")
-st.caption("僅供學習監控。投資有風險，請獨立判斷並自負盈虧。")
+st.caption("僅供學習監控。投資有風險，請獨立判斷並自負盈虧。朱家泓訊號中的「第幾波」為程式近似，實戰務必人工確認位階與量價結構。")
