@@ -1002,7 +1002,9 @@ with tabs[0]:
     if cdf.empty:
         st.info("目前沒有跨訊號重疊個股。")
     else:
-        st.dataframe(cdf, use_container_width=True, hide_index=True)
+        st.dataframe(cdf, use_containertry:
+except TypeError:
+    st.dataframe(cdf, use_container_width=True)_width=True, hide_index=True)
 
 with tabs[1]:
     render_signal_tab(results.get("林恩如20週均線W底", []), "林恩如 20 週均線 W 底戰法", "歷史勝率 58.5%｜站上 100MA 與月線 + W 底不再破底 + 帶量")
