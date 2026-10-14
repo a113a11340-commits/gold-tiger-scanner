@@ -1,17 +1,6 @@
-"""
 ================================================================================
-台股精選訊號監控系統（Streamlit v28.6 候選名單優化 + 純做多版）
-================================================================================
-【版本更新說明 v28.6】
-1. 建立「週線+日線多頭」候選名單：本週第一次開啟或強制更新才重掃全部
-2. 同週內只跑候選名單，減少 API 請求
-3. 完全移除頂背離（只做多）
-4. 所有做多策略需通過週線多頭 + 日線多頭過濾
-5. 林恩如、資金輪動使用 Yahoo 官方週線 (interval=1wk)
-6. 阿水一式維持 2.1 倍標準差 + 帶寬 <= 0.2
-================================================================================
-"""
-
+# 台股精選訊號監控系統（Streamlit v28.6 候選名單優化 + 純做多版 - 修復版）
+# ==============================================================================
 import streamlit as st
 import pandas as pd
 import requests
@@ -149,8 +138,6 @@ def calc_bollinger_bands(closes, period=20, num_std=2.0):
     return ma, upper, lower, bandwidth
 
 
-
-
 def is_weekly_and_daily_bullish(hist, hist_w=None):
     """共同過濾：週線多頭 + 日線多頭"""
     closes = hist["closes"]
@@ -174,6 +161,7 @@ def _current_week_key():
     t = time.localtime()
     monday_ts = time.mktime(t) - t.tm_wday * 86400
     return time.strftime("%Y-%m-%d", time.localtime(monday_ts))
+
 
 def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"], interval: str = "1d"):
     """從 Yahoo 抓取歷史資料，interval 可為 1d / 1wk / 1mo"""
@@ -371,23 +359,14 @@ def analyze_lin_sector_rotation(hist):
     }
 
 
-# ==============================================================================
-# 【阿水一式】嚴格採用：2.1倍標準差 + 帶寬 <= 0.2 + 成交量 >= 2倍均量
-# ==============================================================================
 def analyze_ashui_1(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
-    # 阿水正統 2.1 倍標準差
     ma20, upper, lower, bandwidth = calc_bollinger_bands(closes, period=20, num_std=2.1)
     if None in (ma20[-1], upper[-1], bandwidth[-1]):
         return None
-    
-    # 核心條件：
-    # 1. 帶寬近 10 日內出現 <= 0.2 的壓縮狀態
-    # 2. 當日成交量 >= 前 5 日均量的 2 倍
-    # 3. 收紅 K 突破或貼緊 2.1 倍上軌
     is_compressed = min(bandwidth[-10:]) <= 0.2
     is_volume_surge = vols[-1] >= (sum(vols[-6:-1]) / 5) * 2.0
     is_break_upper = closes[-1] > opens[-1] and closes[-1] >= upper[-1] * 0.995
@@ -670,11 +649,6 @@ def analyze_bull_divergence(hist):
     }
 
 
-
-
-# ==============================================================================
-# 保留之 15 種策略鍵值對映清單
-# ==============================================================================
 SIGNAL_KEYS = [
     "林恩如20週均線W底", "朱家泓頭頭高底底高", "施昇輝0050樂活KD", "資金輪動主流強勢股",
     "阿水一式", "貫穿線", "三內身", "大K棒收回", "三白兵", "爆量三白兵",
@@ -683,7 +657,6 @@ SIGNAL_KEYS = [
 
 
 def build_bullish_candidates(main_stocks):
-    """掃描全部股票，建立週線+日線多頭候選名單"""
     candidates = []
     def check_one(item):
         hist = get_yahoo_history(item["sid"], interval="1d")
@@ -706,11 +679,6 @@ def build_bullish_candidates(main_stocks):
 
 
 def run_full_scan(force_refresh_candidates=False):
-    """
-    執行策略掃描（純做多）
-    - 本週第一次 / 強制更新 → 重建候選名單
-    - 同週內 → 只用候選名單跑詳細策略
-    """
     results = {k: [] for k in SIGNAL_KEYS}
 
     def add(key, item, r):
@@ -757,7 +725,6 @@ def run_full_scan(force_refresh_candidates=False):
             return []
         if hist_w is None:
             hist_w = get_yahoo_history(item["sid"], interval="1wk", max_n=120)
-        # 再確認一次多頭（日線可能已更新）
         if not is_weekly_and_daily_bullish(hist, hist_w):
             return []
         found = []
@@ -793,7 +760,6 @@ def run_full_scan(force_refresh_candidates=False):
     return results
 
 
-
 def build_conflict_table(results):
     by_sid = {}
     for key, items in results.items():
@@ -815,13 +781,9 @@ def build_conflict_table(results):
         })
     if not rows:
         return pd.DataFrame()
-    # 衝突「否」在前面，「是」在後面
     return pd.DataFrame(rows).sort_values(["衝突", "策略數"], ascending=[True, False])
 
 
-# ==============================================================================
-# 圖表繪製函數 (阿水一式採用 2.1 倍布林軌道)
-# ==============================================================================
 def make_chart(hist, title, is_bollinger=False):
     closes = hist["closes"][-100:]
     opens = hist["opens"][-100:]
@@ -839,7 +801,6 @@ def make_chart(hist, title, is_bollinger=False):
     ), row=1, col=1)
     
     if is_bollinger:
-        # 阿水一式專用：使用 2.1 倍標準差繪製布林通道
         _, upper_all, lower_all, _ = calc_bollinger_bands(hist["closes"], period=20, num_std=2.1)
         ma20_all = calc_ma_list(hist["closes"], 20)
         upper = upper_all[-100:]
@@ -850,7 +811,6 @@ def make_chart(hist, title, is_bollinger=False):
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="布林中軌(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌(2.1v)", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
     else:
-        # 其他策略：顯示月線與 100MA
         ma20 = calc_ma_list(hist["closes"], 20)[-100:]
         ma100 = calc_ma_list(hist["closes"], 100)[-100:]
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="月線(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
@@ -929,9 +889,6 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
             st.plotly_chart(fig, use_container_width=True, key=f"c_{title}_{idx}_{item['sid']}")
 
 
-# ==============================================================================
-# 網頁介面 (Streamlit UI)
-# ==============================================================================
 st.title("台股精選訊號 v28.6（候選名單優化 + 純做多版）")
 st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜本週候選名單優化｜已移除頂背離｜官方週線")
 
@@ -967,8 +924,6 @@ with col3:
                 del st.session_state[k]
         st.rerun()
 
-# 不在進網頁時自動掃描，避免 Streamlit Cloud 超時 / Yahoo 限流
-# 只有按下按鈕才執行
 if do_scan or force_candidates:
     with st.spinner("掃描中..."):
         st.session_state["scan_results_v28"] = run_full_scan(force_refresh_candidates=bool(force_candidates))
@@ -1002,9 +957,10 @@ with tabs[0]:
     if cdf.empty:
         st.info("目前沒有跨訊號重疊個股。")
     else:
-        st.dataframe(cdf, use_containertry:
-except TypeError:
-    st.dataframe(cdf, use_container_width=True)_width=True, hide_index=True)
+        try:
+            st.dataframe(cdf, use_container_width=True, hide_index=True)
+        except TypeError:
+            st.dataframe(cdf, use_container_width=True)
 
 with tabs[1]:
     render_signal_tab(results.get("林恩如20週均線W底", []), "林恩如 20 週均線 W 底戰法", "歷史勝率 58.5%｜站上 100MA 與月線 + W 底不再破底 + 帶量")
