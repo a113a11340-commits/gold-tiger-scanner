@@ -1,12 +1,14 @@
 """
 ================================================================================
-台股精選訊號監控系統（Streamlit v26.0 阿水一式布林通道圖表專用修正版）
+台股精選訊號監控系統（Streamlit v28.6 候選名單優化 + 純做多版）
 ================================================================================
-【更新說明】
-- 修正「阿水一式」策略的詳細K線圖：自動繪製布林通道（上軌、中軌MA20、下軌），
-  讓您能直覺觀察布林通道壓縮與帶量突破上軌的型態。
-- 衝突彙整排序保持「衝突：否」在前、「衝突：是」在後。
-- 完整保留 15 大經典名師與技術分析戰法。
+【版本更新說明 v28.6】
+1. 建立「週線+日線多頭」候選名單：本週第一次開啟或強制更新才重掃全部
+2. 同週內只跑候選名單，減少 API 請求
+3. 完全移除頂背離（只做多）
+4. 所有做多策略需通過週線多頭 + 日線多頭過濾
+5. 林恩如、資金輪動使用 Yahoo 官方週線 (interval=1wk)
+6. 阿水一式維持 2.1 倍標準差 + 帶寬 <= 0.2
 ================================================================================
 """
 
@@ -21,7 +23,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v26.0")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v28.6")
 
 # 樣式調整
 st.markdown("""
@@ -54,7 +56,6 @@ WINRATE = {
     "破底翻": "48.2%",
     "RSI鈍化": "45.6%",
     "多頭背離": "43.4%",
-    "頂背離": "54.4%",
 }
 
 # 雲端清單來源設定
@@ -67,7 +68,7 @@ MAIN_SHEET = {
 CONFIG = {
     "MIN_VOLUME": 500000,      # 最小成交量限制：預設 500,000 (500張)
     "MAX_HISTORY": 300,        # 拉長歷史資料天數至 300 天，支援 100MA 與多月波段型態
-    "BATCH_WORKERS": 200,       # 多執行緒平行處理數量
+    "BATCH_WORKERS": 20,       # 多執行緒平行處理數量
     "CACHE_TTL": 300,          # 資料快取時間（秒）
 }
 
@@ -148,14 +149,43 @@ def calc_bollinger_bands(closes, period=20, num_std=2.0):
     return ma, upper, lower, bandwidth
 
 
-def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"]):
+
+
+def is_weekly_and_daily_bullish(hist, hist_w=None):
+    """共同過濾：週線多頭 + 日線多頭"""
+    closes = hist["closes"]
+    if len(closes) < 30:
+        return False
+    ma20 = calc_ma_list(closes, 20)
+    if ma20[-1] is None or closes[-1] <= ma20[-1]:
+        return False
+    if hist_w is not None and len(hist_w.get("closes", [])) >= 25:
+        w_ma20 = calc_ma_list(hist_w["closes"], 20)
+        if w_ma20[-1] is not None:
+            return hist_w["closes"][-1] > w_ma20[-1]
+    ma100 = calc_ma_list(closes, 100)
+    if ma100[-1] is None:
+        return False
+    return closes[-1] > ma100[-1]
+
+
+def _current_week_key():
+    """本週週一日期字串，用來判斷候選名單是否本週建立"""
+    t = time.localtime()
+    monday_ts = time.mktime(t) - t.tm_wday * 86400
+    return time.strftime("%Y-%m-%d", time.localtime(monday_ts))
+
+def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"], interval: str = "1d"):
+    """從 Yahoo 抓取歷史資料，interval 可為 1d / 1wk / 1mo"""
     if sid in SYMBOL_CACHE:
         suffixes = [SYMBOL_CACHE[sid]]
     else:
         suffixes = [".TW", ".TWO"]
+    range_str = "5y" if interval in ("1wk", "1mo") else "2y"
+    min_bars = 30 if interval in ("1wk", "1mo") else 150
     for sfx in suffixes:
         try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range=2y&interval=1d"
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={range_str}&interval={interval}"
             res = HTTP_SESSION.get(url, timeout=5)
             if res.status_code != 200:
                 continue
@@ -179,7 +209,7 @@ def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"]):
                         t_dates.append(time.strftime("%Y-%m-%d", time.localtime(timestamps[i])))
                     else:
                         t_dates.append("")
-            if len(t_cls) < 150:
+            if len(t_cls) < min_bars:
                 continue
             SYMBOL_CACHE[sid] = sfx
             if len(t_cls) > max_n:
@@ -341,23 +371,37 @@ def analyze_lin_sector_rotation(hist):
     }
 
 
+# ==============================================================================
+# 【阿水一式】嚴格採用：2.1倍標準差 + 帶寬 <= 0.2 + 成交量 >= 2倍均量
+# ==============================================================================
 def analyze_ashui_1(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
-    ma20, upper, lower, bandwidth = calc_bollinger_bands(closes, period=20, num_std=2.0)
-    if None in (ma20[-1], upper[-1], bandwidth[-1], bandwidth[-5]):
+    # 阿水正統 2.1 倍標準差
+    ma20, upper, lower, bandwidth = calc_bollinger_bands(closes, period=20, num_std=2.1)
+    if None in (ma20[-1], upper[-1], bandwidth[-1]):
         return None
-    if not (min(bandwidth[-10:]) < (sum(bandwidth[-60:]) / 60) * 0.85 and vols[-1] >= (sum(vols[-6:-1])/5) * 2.0 and closes[-1] > opens[-1] and closes[-1] >= upper[-1] * 0.995):
+    
+    # 核心條件：
+    # 1. 帶寬近 10 日內出現 <= 0.2 的壓縮狀態
+    # 2. 當日成交量 >= 前 5 日均量的 2 倍
+    # 3. 收紅 K 突破或貼緊 2.1 倍上軌
+    is_compressed = min(bandwidth[-10:]) <= 0.2
+    is_volume_surge = vols[-1] >= (sum(vols[-6:-1]) / 5) * 2.0
+    is_break_upper = closes[-1] > opens[-1] and closes[-1] >= upper[-1] * 0.995
+
+    if not (is_compressed and is_volume_surge and is_break_upper):
         return None
+
     return {
-        "signal": "阿水一式：布林通道壓縮後帶量突破上軌",
+        "signal": f"阿水一式：帶寬壓縮({bandwidth[-1]:.2f}≤0.2)+2倍均量突破2.1倍上軌",
         "direction": "買進", "side": "long", "winrate": WINRATE["阿水一式"],
         "entry": round(closes[-1] * 1.005, 2),
         "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
         "target": round(closes[-1] * 1.10, 2),
-        "how": "壓縮+帶量+紅K突破通道頂",
+        "how": "帶寬<=0.2壓縮+2倍均量+紅K突破上軌",
         "price": closes[-1],
     }
 
@@ -626,21 +670,6 @@ def analyze_bull_divergence(hist):
     }
 
 
-def analyze_top_divergence(hist):
-    closes, lows, highs, vols = hist["closes"], hist["lows"], hist["highs"], hist["vols"]
-    if len(closes) < 80 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    info = _best_div(closes, lows, highs, bull=False)
-    if not info:
-        return None
-    tag = "二度空頭背離" if info["is_double"] else "一次空頭背離（頂背離）"
-    return {
-        "signal": f"{tag}：價新高RSI未新低（{info['rsi_txt']}）",
-        "direction": "賣出／減碼", "side": "short", "winrate": WINRATE["頂背離"],
-        "entry": "-", "stop": "-", "target": round(closes[-1] * 0.95, 2),
-        "how": "持有者減碼；空手不追高。",
-        "price": closes[-1],
-    }
 
 
 # ==============================================================================
@@ -649,11 +678,39 @@ def analyze_top_divergence(hist):
 SIGNAL_KEYS = [
     "林恩如20週均線W底", "朱家泓頭頭高底底高", "施昇輝0050樂活KD", "資金輪動主流強勢股",
     "阿水一式", "貫穿線", "三內身", "大K棒收回", "三白兵", "爆量三白兵",
-    "黏合晨星", "破底翻", "RSI鈍化", "多頭背離", "頂背離"
+    "黏合晨星", "破底翻", "RSI鈍化", "多頭背離"
 ]
 
 
-def run_full_scan():
+def build_bullish_candidates(main_stocks):
+    """掃描全部股票，建立週線+日線多頭候選名單"""
+    candidates = []
+    def check_one(item):
+        hist = get_yahoo_history(item["sid"], interval="1d")
+        hist_w = get_yahoo_history(item["sid"], interval="1wk", max_n=120)
+        if hist is None:
+            return None
+        if is_weekly_and_daily_bullish(hist, hist_w):
+            return {"sid": item["sid"], "name": item["name"],
+                    "sheet": item.get("sheet", "主要清單"), "hist": hist, "hist_w": hist_w}
+        return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CONFIG["BATCH_WORKERS"]) as ex:
+        for f in concurrent.futures.as_completed([ex.submit(check_one, i) for i in main_stocks]):
+            try:
+                res = f.result()
+                if res:
+                    candidates.append(res)
+            except Exception:
+                pass
+    return candidates
+
+
+def run_full_scan(force_refresh_candidates=False):
+    """
+    執行策略掃描（純做多）
+    - 本週第一次 / 強制更新 → 重建候選名單
+    - 同週內 → 只用候選名單跑詳細策略
+    """
     results = {k: [] for k in SIGNAL_KEYS}
 
     def add(key, item, r):
@@ -666,15 +723,46 @@ def run_full_scan():
         ))
 
     main_stocks = load_main_stocks()
+    if not main_stocks:
+        st.warning("目前沒有任何股票可掃描，請檢查 Google 試算表設定。")
+        return results
 
-    def process_main(item):
-        hist = get_yahoo_history(item["sid"])
+    week_key = _current_week_key()
+    need_update = (
+        force_refresh_candidates
+        or "bullish_candidates" not in st.session_state
+        or st.session_state.get("candidates_week") != week_key
+    )
+
+    if need_update:
+        reason = "強制更新" if force_refresh_candidates else "本週首次/跨週"
+        with st.spinner(f"正在建立「週線+日線多頭」候選名單（{reason}）..."):
+            candidates = build_bullish_candidates(main_stocks)
+            st.session_state["bullish_candidates"] = candidates
+            st.session_state["candidates_week"] = week_key
+            st.session_state["candidates_built_at"] = time.strftime("%Y-%m-%d %H:%M")
+        st.info(f"候選名單已更新（{reason}）：共 {len(candidates)} 檔｜{st.session_state['candidates_built_at']}")
+    else:
+        candidates = st.session_state.get("bullish_candidates", [])
+        st.caption(f"使用本週候選名單（共 {len(candidates)} 檔，建立於 {st.session_state.get('candidates_built_at','?')}）")
+
+    if not candidates:
+        st.warning("目前沒有符合週線+日線多頭的股票。")
+        return results
+
+    def process_candidate(item):
+        hist = item.get("hist") or get_yahoo_history(item["sid"], interval="1d")
+        hist_w = item.get("hist_w")
         if hist is None:
             return []
-        item = {**item, "hist": hist}
+        if hist_w is None:
+            hist_w = get_yahoo_history(item["sid"], interval="1wk", max_n=120)
+        # 再確認一次多頭（日線可能已更新）
+        if not is_weekly_and_daily_bullish(hist, hist_w):
+            return []
         found = []
         mapping = [
-            ("林恩如20週均線W底", analyze_lin_20w_w_bottom),
+            ("林恩如20週均線W底", lambda h: analyze_lin_20w_w_bottom(h)),
             ("朱家泓頭頭高底底高", analyze_chujiahung_bottom),
             ("施昇輝0050樂活KD", analyze_shishenghui_kd),
             ("資金輪動主流強勢股", analyze_lin_sector_rotation),
@@ -683,27 +771,27 @@ def run_full_scan():
             ("三內身", analyze_three_inside_up),
             ("大K棒收回", analyze_power_candle_recovery),
             ("三白兵", lambda h: analyze_bull_sanbaibing(h, False)),
-            ("爆量3白兵", lambda h: analyze_bull_sanbaibing(h, True)),
+            ("爆量三白兵", lambda h: analyze_bull_sanbaibing(h, True)),
             ("黏合晨星", analyze_bull_sticky_morning),
             ("破底翻", analyze_break_bottom_flip),
             ("RSI鈍化", analyze_rsi_passivation),
             ("多頭背離", analyze_bull_divergence),
-            ("頂背離", analyze_top_divergence),
         ]
         for key, fn in mapping:
             r = fn(hist)
             if r:
-                found.append((key, item, r))
+                found.append((key, {**item, "hist": hist, "hist_w": hist_w}, r))
         return found
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=CONFIG["BATCH_WORKERS"]) as ex:
-        for f in concurrent.futures.as_completed([ex.submit(process_main, i) for i in main_stocks]):
+        for f in concurrent.futures.as_completed([ex.submit(process_candidate, i) for i in candidates]):
             try:
                 for key, item, r in f.result():
                     add(key, item, r)
             except Exception:
                 pass
     return results
+
 
 
 def build_conflict_table(results):
@@ -732,7 +820,7 @@ def build_conflict_table(results):
 
 
 # ==============================================================================
-# 圖表繪製函數 (支援針對「阿水一式」顯示布林通道軌道)
+# 圖表繪製函數 (阿水一式採用 2.1 倍布林軌道)
 # ==============================================================================
 def make_chart(hist, title, is_bollinger=False):
     closes = hist["closes"][-100:]
@@ -751,18 +839,18 @@ def make_chart(hist, title, is_bollinger=False):
     ), row=1, col=1)
     
     if is_bollinger:
-        # 阿水一式專用：繪製布林通道（上軌、中軌MA20、下軌）
-        _, upper_all, lower_all, _ = calc_bollinger_bands(hist["closes"], period=20, num_std=2.0)
+        # 阿水一式專用：使用 2.1 倍標準差繪製布林通道
+        _, upper_all, lower_all, _ = calc_bollinger_bands(hist["closes"], period=20, num_std=2.1)
         ma20_all = calc_ma_list(hist["closes"], 20)
         upper = upper_all[-100:]
         lower = lower_all[-100:]
         ma20 = ma20_all[-100:]
         
-        fig.add_trace(go.Scatter(x=x, y=upper, mode="lines", name="布林上軌", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=upper, mode="lines", name="布林上軌(2.1v)", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="布林中軌(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌(2.1v)", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
     else:
-        # 其他策略：維持顯示月線與 100MA
+        # 其他策略：顯示月線與 100MA
         ma20 = calc_ma_list(hist["closes"], 20)[-100:]
         ma100 = calc_ma_list(hist["closes"], 100)[-100:]
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="月線(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
@@ -837,7 +925,6 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
                 f"停損 **{item.get('stop','-')}**｜目標 **{item.get('target','-')}**｜"
                 f"量 **{item.get('lots',0)}張**"
             )
-            # 傳入 is_bollinger 參數決定是否繪製布林通道
             fig = make_chart(item["hist"], f"{item['sid']} {item['name']}", is_bollinger=is_bollinger)
             st.plotly_chart(fig, use_container_width=True, key=f"c_{title}_{idx}_{item['sid']}")
 
@@ -845,8 +932,8 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
 # ==============================================================================
 # 網頁介面 (Streamlit UI)
 # ==============================================================================
-st.title("台股精選訊號 v26.0（阿水一式布林通道圖表修正版）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜阿水一式已修正為顯示布林軌道，衝突排序調整完畢")
+st.title("台股精選訊號 v28.6（候選名單優化 + 純做多版）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜本週候選名單優化｜已移除頂背離｜官方週線")
 
 st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。")
 
@@ -858,31 +945,38 @@ with st.expander("策略總覽與勝率清單", expanded=True):
 | 買 | **朱家泓頭頭高底底高** | **57.8%**（頭頭高、底底高多頭結構 + 站上月線帶量） |
 | 買 | 施昇輝0050樂活KD | **56.5%**（KD<20超賣區 + 站上月線逢低佈局） |
 | 買 | 資金輪動主流強勢股 | **59.2%**（100MA與月線之上 + 接近新高 + 爆量） |
-| 買 | **阿水一式** | **53.5%**（布林通道壓縮 + 2倍均量 + 紅K突破上軌） **[圖表已改為布林軌道]** |
+| 買 | **阿水一式** | **53.5%**（2.1倍布林帶寬<=0.2壓縮 + 2倍均量 + 紅K突破上軌） **[正統帶寬<=0.2邏輯]** |
 | 買 | 貫穿線 / 三內身 | **66.0% / 65.0%**（高勝率反轉 + 站上月線） |
 | 買 | 大K棒強力收回 | **68.0%**（突破恐慌陰線 + 站上月線） |
 | 買 | 三白兵 / 爆量三白兵 / 黏合晨星 | **48.8% / 45.7% / 46.3%** |
 | 買 | 破底翻 / RSI鈍化 | **48.2% / 45.6%** |
 | 買 | 多頭背離 | **43.4%**（RSI5、RSI10 價新低RSI未新低） |
-| 賣 | 頂背離 | **54.4%**（RSI5、RSI10 價新高RSI未新低） |
 """)
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
-    do_scan = st.button("同步掃描全部 15 種策略", use_container_width=True)
+    do_scan = st.button("掃描訊號（使用本週候選）", use_container_width=True)
 with col2:
-    if st.button("強制刷新", type="primary", use_container_width=True):
+    force_candidates = st.button("強制更新候選名單", use_container_width=True)
+with col3:
+    if st.button("清除快取", type="primary", use_container_width=True):
         st.cache_data.clear()
         SYMBOL_CACHE.clear()
+        for k in ("bullish_candidates", "candidates_week", "scan_results_v28"):
+            if k in st.session_state:
+                del st.session_state[k]
         st.rerun()
 
-if do_scan or "scan_results_v26" not in st.session_state:
-    with st.spinner("掃描中（載入 300 天歷史資料並執行 15 種名師戰法）..."):
-        st.session_state["scan_results_v26"] = run_full_scan()
-    if do_scan:
-        st.success("掃描完成")
+# 不在進網頁時自動掃描，避免 Streamlit Cloud 超時 / Yahoo 限流
+# 只有按下按鈕才執行
+if do_scan or force_candidates:
+    with st.spinner("掃描中..."):
+        st.session_state["scan_results_v28"] = run_full_scan(force_refresh_candidates=bool(force_candidates))
+    st.success("掃描完成")
 
-results = st.session_state.get("scan_results_v26", {})
+results = st.session_state.get("scan_results_v28", {})
+if not results:
+    st.info("請先按「強制更新候選名單」建立本週多頭股票，再按「掃描訊號」。")
 
 tabs = st.tabs([
     "衝突彙整",
@@ -900,7 +994,6 @@ tabs = st.tabs([
     "破底翻 48%",
     "RSI鈍化 45%",
     "多頭背離 43%",
-    "頂背離 54%",
 ])
 
 with tabs[0]:
@@ -920,8 +1013,7 @@ with tabs[3]:
 with tabs[4]:
     render_signal_tab(results.get("資金輪動主流強勢股", []), "資金輪動主流強勢股", "歷史勝率 59.2%｜100MA與月線之上 + 接近新高 + 爆量")
 with tabs[5]:
-    # 阿水一式分頁：設定 is_bollinger=True 顯示布林通道軌道
-    render_signal_tab(results.get("阿水一式", []), "阿水一式（布林通道壓縮突破）", "歷史勝率 53.5%｜壓縮 + 2倍均量 + 紅K突破通道頂", is_bollinger=True)
+    render_signal_tab(results.get("阿水一式", []), "阿水一式（帶寬<=0.2壓縮突破）", "歷史勝率 53.5%｜2.1倍帶寬<=0.2 + 2倍均量 + 紅K突破上軌", is_bollinger=True)
 with tabs[6]:
     render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "歷史勝率 66.0%｜高勝率反轉 + 站上月線")
 with tabs[7]:
@@ -940,8 +1032,6 @@ with tabs[13]:
     render_signal_tab(results.get("RSI鈍化", []), "RSI 鈍化", "歷史勝率 45.6%")
 with tabs[14]:
     render_signal_tab(results.get("多頭背離", []), "一次／二度多頭背離", "RSI(5) 與 RSI(10) 檢查｜歷史底背離約 43.4%")
-with tabs[15]:
-    render_signal_tab(results.get("頂背離", []), "RSI 頂背離（唯一賣出）", "RSI(5) 與 RSI(10) 檢查｜歷史勝率 54.4%")
 
 st.markdown("---")
 st.caption("僅供學習監控。投資有風險，請獨立判斷並自負盈虧。")
