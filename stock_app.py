@@ -1,5 +1,5 @@
 # ==============================================================================
-# 台股精選訊號監控系統（Streamlit v28.6 候選名單優化 + 純做多版 - 修復版）
+# 台股精選訊號監控系統（Streamlit v28.6 候選名單優化 + 朱家泓戰法重構版）
 # ==============================================================================
 import streamlit as st
 import pandas as pd
@@ -56,8 +56,8 @@ MAIN_SHEET = {
 # 系統全域設定
 CONFIG = {
     "MIN_VOLUME": 500000,      # 最小成交量限制：預設 500,000 (500張)
-    "MAX_HISTORY": 300,        # 拉長歷史資料天數至 300 天，支援 100MA 與多月波段型態
-    "BATCH_WORKERS": 20,       # 多執行緒平行處理數量
+    "MAX_HISTORY": 300,        # 拉長歷史資料天數至 300 天
+    "BATCH_WORKERS": 200,       # 多執行緒平行處理數量
     "CACHE_TTL": 300,          # 資料快取時間（秒）
 }
 
@@ -157,14 +157,14 @@ def is_weekly_and_daily_bullish(hist, hist_w=None):
 
 
 def _current_week_key():
-    """本週週一日期字串，用來判斷候選名單是否本週建立"""
+    """本週週一日期字串"""
     t = time.localtime()
     monday_ts = time.mktime(t) - t.tm_wday * 86400
     return time.strftime("%Y-%m-%d", time.localtime(monday_ts))
 
 
 def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"], interval: str = "1d"):
-    """從 Yahoo 抓取歷史資料，interval 可為 1d / 1wk / 1mo"""
+    """從 Yahoo 抓取歷史資料"""
     if sid in SYMBOL_CACHE:
         suffixes = [SYMBOL_CACHE[sid]]
     else:
@@ -256,8 +256,22 @@ def _pack(sid, name, sheet, hist, price, signal, direction, entry, stop, target,
     }
 
 
+def _swing_indices(values, order=3, find_min=True):
+    out = []
+    n = len(values)
+    for i in range(order, n - order):
+        window = values[i - order:i + order + 1]
+        if find_min:
+            if values[i] == min(window):
+                out.append(i)
+        else:
+            if values[i] == max(window):
+                out.append(i)
+    return out
+
+
 # ==============================================================================
-# 15 大策略函數定義
+# 策略函數定義
 # ==============================================================================
 def analyze_lin_20w_w_bottom(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
@@ -285,29 +299,64 @@ def analyze_lin_20w_w_bottom(hist):
 
 
 def analyze_chujiahung_bottom(hist):
+    """
+    朱家泓頭頭高、底底高戰法（實戰重構版）
+    結合：均線多頭排列且向上斜率 + 波段 Swing 轉折點頭頭高底底高 + 帶量紅K攻擊訊號
+    """
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
-    if n < 100 or vols[-1] < CONFIG["MIN_VOLUME"]:
+    if n < 120 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
+    
+    # 1. 均線條件：月線(MA20)與季線(MA60)必須多頭排列且向上翻揚
     ma20 = calc_ma_list(closes, 20)
-    if ma20[-1] is None or closes[-1] <= ma20[-1]:
+    ma60 = calc_ma_list(closes, 60)
+    if None in (ma20[-1], ma20[-2], ma60[-1], ma60[-2]):
         return None
-    recent_lows = lows[-60:]
-    early_min, late_min = min(recent_lows[:30]), min(recent_lows[30:])
-    recent_highs = highs[-60:]
-    early_max, late_max = max(recent_highs[:30]), max(recent_highs[30:])
-    if not (late_min >= early_min and late_max >= early_max):
+    
+    # 檢查均線是否向上走揚且 MA20 > MA60
+    is_ma_bullish = (ma20[-1] > ma20[-2]) and (ma60[-1] > ma60[-2]) and (ma20[-1] > ma60[-1])
+    if not is_ma_bullish or closes[-1] <= ma20[-1]:
         return None
+    
+    # 2. 波段轉折點（Swing Pivots）確認「頭頭高、底底高」
+    look = 90
+    low_swings = _swing_indices(lows[-look:], order=4, find_min=True)
+    high_swings = _swing_indices(highs[-look:], order=4, find_min=False)
+    
+    base_idx = n - look
+    abs_low_swings = [base_idx + i for i in low_swings]
+    abs_high_swings = [base_idx + i for i in high_swings]
+    
+    if len(abs_low_swings) < 2 or len(abs_high_swings) < 2:
+        return None
+        
+    l1, l2 = lows[abs_low_swings[-2]], lows[abs_low_swings[-1]]
+    h1, h2 = highs[abs_high_swings[-2]], highs[abs_high_swings[-1]]
+    
+    # 嚴格確認波段結構：底底高 (l2 > l1) 且 頭頭高 (h2 > h1)
+    if not (l2 > l1 and h2 > h1):
+        return None
+        
+    # 3. 攻擊訊號與量價配合：帶量紅K突破
     avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
-    if not (avg5_vol > 0 and vols[-1] >= avg5_vol * 1.2 and closes[-1] > opens[-1]):
+    is_volume_surge = avg5_vol > 0 and vols[-1] >= avg5_vol * 1.3
+    is_bullish_candle = closes[-1] > opens[-1]
+    
+    # 避開高檔末升段：必須接近或突破近期高點
+    recent_high_60 = max(highs[-60:-1])
+    is_breakout_or_strong = closes[-1] >= recent_high_60 * 0.98
+    
+    if not (is_volume_surge and is_bullish_candle and is_breakout_or_strong):
         return None
+        
     return {
-        "signal": "朱家泓頭頭高底底高：形成頭頭高底底高多頭結構+站上月線帶量",
+        "signal": "朱家泓頭頭高底底高：均線多排向上+波段頭頭高底底高+帶量突破",
         "direction": "買進", "side": "long", "winrate": WINRATE["朱家泓頭頭高底底高"],
         "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1], ma20[-1] * 0.98), 2),
-        "target": round(closes[-1] * 1.12, 2),
-        "how": "確認頭頭高、底底高多頭排列，站上月線帶量攻擊",
+        "stop": round(min(lows[-1], l2, ma20[-1] * 0.98), 2),
+        "target": round(closes[-1] * 1.15, 2),
+        "how": "朱家泓6字訣：多頭趨勢確立（頭頭高、底底高），月季線向上，帶量紅K突破進場，停損守最近低點(l2)或月線下。",
         "price": closes[-1],
     }
 
@@ -567,20 +616,6 @@ def analyze_rsi_passivation(hist):
     }
 
 
-def _swing_indices(values, order=3, find_min=True):
-    out = []
-    n = len(values)
-    for i in range(order, n - order):
-        window = values[i - order:i + order + 1]
-        if find_min:
-            if values[i] == min(window):
-                out.append(i)
-        else:
-            if values[i] == max(window):
-                out.append(i)
-    return out
-
-
 def _div_pairs_for_period(closes, lows, highs, rsi, look, bull=True):
     n = len(closes)
     base = n - look
@@ -812,8 +847,10 @@ def make_chart(hist, title, is_bollinger=False):
         fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌(2.1v)", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
     else:
         ma20 = calc_ma_list(hist["closes"], 20)[-100:]
+        ma60 = calc_ma_list(hist["closes"], 60)[-100:]
         ma100 = calc_ma_list(hist["closes"], 100)[-100:]
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="月線(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=x, y=ma60, mode="lines", name="季線(MA60)", line=dict(color="#32CD32", width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=ma100, mode="lines", name="100MA(20週)", line=dict(color="#FF4500", width=2)), row=1, col=1)
         
     colors = ["#FF3333" if closes[i] >= opens[i] else "#00A600" for i in range(len(closes))]
@@ -889,8 +926,11 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
             st.plotly_chart(fig, use_container_width=True, key=f"c_{title}_{idx}_{item['sid']}")
 
 
-st.title("台股精選訊號 v28.6（候選名單優化 + 純做多版）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜本週候選名單優化｜已移除頂背離｜官方週線")
+# ==============================================================================
+# UI 主介面設定
+# ==============================================================================
+st.title("台股精選訊號 v28.6（朱家泓戰法重構版）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜本週候選名單優化｜朱家泓頭頭高底底高邏輯修正")
 
 st.warning("勝率為歷史回測樣本，未扣成本，不構成投資建議。")
 
@@ -899,7 +939,7 @@ with st.expander("策略總覽與勝率清單", expanded=True):
 | 方向 | 訊號名稱 | 核心邏輯 / 參考勝率 |
 |------|----------|---------------------|
 | 買 | **林恩如20週均線W底** | **58.5%**（站上100MA與月線 + W底不再破底 + 帶量） |
-| 買 | **朱家泓頭頭高底底高** | **57.8%**（頭頭高、底底高多頭結構 + 站上月線帶量） |
+| 買 | **朱家泓頭頭高底底高** | **57.8%**（月季線向上 + 波段頭頭高底底高 + 帶量攻擊） |
 | 買 | 施昇輝0050樂活KD | **56.5%**（KD<20超賣區 + 站上月線逢低佈局） |
 | 買 | 資金輪動主流強勢股 | **59.2%**（100MA與月線之上 + 接近新高 + 爆量） |
 | 買 | **阿水一式** | **53.5%** (2.1倍布林帶寬<=0.2壓縮 + 2倍均量 + 紅K突破上軌) |
@@ -965,9 +1005,9 @@ with tabs[0]:
 with tabs[1]:
     render_signal_tab(results.get("林恩如20週均線W底", []), "林恩如 20 週均線 W 底戰法", "歷史勝率 58.5%｜站上 100MA 與月線 + W 底不再破底 + 帶量")
 with tabs[2]:
-    render_signal_tab(results.get("朱家泓頭頭高底底高", []), "朱家泓頭頭高底底高戰法", "歷史勝率 57.8%｜頭頭高、底底高多頭結構 + 站上月線帶量")
+    render_signal_tab(results.get("朱家泓頭頭高底底高", []), "朱家泓頭頭高底底高戰法", "歷史勝率 57.8%｜月季線向上 + 波段頭頭高底底高 + 帶量攻擊")
 with tabs[3]:
-    render_signal_tab(results.get("_0050樂活KD", []), "施昇輝 0050 樂活 KD 戰法", "歷史勝率 56.5%｜KD 雙雙跌破 20 低檔超賣區 + 站上月線")
+    render_signal_tab(results.get("施昇輝0050樂活KD", []), "施昇輝 0050 樂活 KD 戰法", "歷史勝率 56.5%｜KD 雙雙跌破 20 低檔超賣區 + 站上月線")
 with tabs[4]:
     render_signal_tab(results.get("資金輪動主流強勢股", []), "資金輪動主流強勢股", "歷史勝率 59.2%｜100MA與月線之上 + 接近新高 + 爆量")
 with tabs[5]:
@@ -975,7 +1015,7 @@ with tabs[5]:
 with tabs[6]:
     render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "歷史勝率 66.0%｜高勝率反轉 + 站上月線")
 with tabs[7]:
-    render_signal_tab(results.get("_3內身", []), "三內身", "歷史勝率 65.0%｜孕線確認 + 站上月線")
+    render_signal_tab(results.get("三內身", []), "三內身", "歷史勝率 65.0%｜孕線確認 + 站上月線")
 with tabs[8]:
     render_signal_tab(results.get("大K棒收回", []), "大K棒強力收回", "歷史勝率 68.0%｜突破恐慌陰線 + 站上月線")
 with tabs[9]:
