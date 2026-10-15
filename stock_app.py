@@ -1,5 +1,5 @@
 # ==============================================================================
-# 台股精選訊號監控系統（Streamlit v28.12 朱家泓戰法多頭發散 N 字重構版）
+# 台股精選訊號監控系統（Streamlit v28.13 朱家泓戰法多頭發散 N 字重構修正版）
 # ==============================================================================
 import streamlit as st
 import pandas as pd
@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v28.12")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v28.13")
 
 # 樣式調整
 st.markdown("""
@@ -188,7 +188,7 @@ def load_main_stocks():
     tasks = []
     try:
         csv_text = fetch_sheet_csv(MAIN_SHEET["base"], MAIN_SHEET["gid"])
-        df = pd.read_csv(io.StringIO(csv_text))
+        df = pd.read_csv(io.StringIO(csv_text), on_bad_lines='skip')
         for _, row in df.iterrows():
             if df.shape[1] < 2:
                 continue
@@ -259,20 +259,11 @@ def analyze_lin_20w_w_bottom(hist):
 
 
 def analyze_chujiahung_bottom(hist):
-    """
-    朱家泓頭頭高、底底高 ＆ 回後買上漲戰法（完全重構修正版 v28.12）
-    1. 均線架構：四線多排且排除均線糾結橫盤 (要求發散斜率)
-    2. 波段結構：嚴格多頭波段 N 字交替 (L1 < L2 且 H1 < H2，且時序必須正確)
-    3. 回後買上漲：拉回修正未跌破前低 (L1) 且守住月線
-    4. 實體紅K強勢突破5MA：收盤價 > 開盤價且過濾掉變盤十字線與長上影線
-    5. 停損防線：精確守波段轉折低點
-    """
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
     if n < 120 or vols[-1] < CONFIG["MIN_VOLUME"]:
         return None
 
-    # ---------- 1. 均線架構：四線多排 + 排除均線糾結橫盤 (要求發散斜率) ----------
     ma5  = calc_ma_list(closes, 5)
     ma10 = calc_ma_list(closes, 10)
     ma20 = calc_ma_list(closes, 20)
@@ -281,12 +272,10 @@ def analyze_chujiahung_bottom(hist):
         return None
     is_ma_aligned = (ma5[-1] > ma10[-1] > ma20[-1] > ma60[-1])
     is_ma_up = (ma20[-1] > ma20[-5]) and (ma60[-1] > ma60[-5])
-    # 核心修正：要求當前5MA與60MA的距離大於10天前的距離，確保均線多頭發散，排除黏合橫盤
     is_expanding = (ma5[-1] - ma60[-1]) > (ma5[-10] - ma60[-10])
     if not (is_ma_aligned and is_ma_up and is_expanding and closes[-1] > ma20[-1]):
         return None
 
-    # ---------- 2. 波段結構：嚴格多頭波段 N 字交替 ----------
     look = 90
     low_swings  = _swing_indices(lows[-look:],  order=4, find_min=True)
     high_swings = _swing_indices(highs[-look:], order=4, find_min=False)
@@ -299,17 +288,13 @@ def analyze_chujiahung_bottom(hist):
     idx_h1, idx_h2 = abs_high_swings[-2], abs_high_swings[-1]
     l1, l2 = lows[idx_l1], lows[idx_l2]
     h1, h2 = highs[idx_h1], highs[idx_h2]
-    # 核心修正：在時間軸上必須形成標準的交替結構，避免極值錯置 L1 -> H1 -> L2
     if not (idx_l1 < idx_h1 < idx_l2):
         return None
-    # 數值定義確認：底底高 且 收盤價或高點過前高
     if not (l2 > l1 * 1.01 and closes[-1] > h1):
         return None
 
-    # ---------- 3. 位階過濾 ----------
     recent_low_60 = min(lows[-60:]) if n >= 60 else min(lows)
     gain_from_low = (closes[-1] / recent_low_60 - 1.0) if recent_low_60 > 0 else 0.0
-    # 排除剛從谷底稍微反彈、大長線趨勢仍被壓制的死盤
     if gain_from_low < 0.05:
         return None
     long_term_high = max(highs[-120:]) if n >= 120 else max(highs)
@@ -322,29 +307,22 @@ def analyze_chujiahung_bottom(hist):
     else:
         wave_label = "第3波（高位階順勢）"
 
-    # ---------- 4. 精確「回後買上漲」與扎實攻擊紅K確認 ----------
-    # 條件 A：拉回修正最低點不能跌破前一波波段低點 (l1)，且守住月線(20MA)
     recent_pullback_lows = lows[-15:-1] if n >= 15 else lows[:-1]
     if min(recent_pullback_lows) < l1 or min(recent_pullback_lows) < ma20[-2] * 0.995:
         return None
-    # 條件 B：當天必須是扎實的「實體紅K棒」（收盤 > 開盤）
     is_bullish_candle = closes[-1] > opens[-1]
     if not is_bullish_candle:
         return None
     body_size = closes[-1] - opens[-1]
     upper_shadow = highs[-1] - closes[-1]
     lower_shadow = opens[-1] - lows[-1]
-    # 核心修正：嚴格過濾長上影線與十字變盤線。實體K棒大小必須大於上下影線總和的 1.2 倍
     is_solid_candle = body_size > (upper_shadow + lower_shadow) * 1.2
-    # 條件 C：精確買點—收盤價正式突破 5MA
     is_above_ma5 = closes[-1] > ma5[-1] and closes[-2] <= ma5[-2]
-    # 條件 D：量能溫和放大（大於5日均量 1.3 倍，且非失控天量）
     avg5_vol = sum(vols[-6:-1]) / 5 if n >= 6 else 0
     is_volume_ok = avg5_vol > 0 and (avg5_vol * 1.3 <= vols[-1] <= avg5_vol * 3.5)
     if not (is_solid_candle and is_above_ma5 and is_volume_ok):
         return None
 
-    # ---------- 5. 停損與目標設定 ----------
     stop_price = round(min(lows[-1], l2), 2)
     target_price = round(closes[-1] * 1.15, 2)
     signal_text = f"朱家泓趨勢重構｜{wave_label}｜回後買上漲突破"
@@ -672,7 +650,6 @@ def make_chart(hist, title, is_bollinger=False):
         fig.add_trace(go.Scatter(x=x, y=ma20, mode="lines", name="布林中軌(MA20)", line=dict(color="#1E90FF", width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=x, y=lower, mode="lines", name="布林下軌(2.1v)", line=dict(color="#FF8C00", width=1.5, dash="dash")), row=1, col=1)
     else:
-        # 繪製朱家泓戰法核心四線：MA5, MA10, MA20(月), MA60(季)
         ma5  = calc_ma_list(hist["closes"], 5)[-100:]
         ma10 = calc_ma_list(hist["closes"], 10)[-100:]
         ma20 = calc_ma_list(hist["closes"], 20)[-100:]
@@ -759,7 +736,7 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
 # ==============================================================================
 # UI 主介面設定
 # ==============================================================================
-st.title("台股精選訊號 v28.12（朱家泓戰法精確重構＋四均線圖表）")
+st.title("台股精選訊號 v28.13（朱家泓戰法精確重構＋四均線圖表）")
 st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜週線+日線雙重多頭過濾｜圖表顯示 MA5/MA10/MA20/MA60")
 
 col1, col2, col3 = st.columns(3)
