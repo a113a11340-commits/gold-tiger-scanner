@@ -1,5 +1,5 @@
 # ==============================================================================
-# 台股精選訊號監控系統（Streamlit v28.13 朱家泓戰法多頭發散 N 字重構修正版）
+# 台股精選訊號監控系統（Streamlit v28.13 朱家泓戰法多頭發散 N 字重構版）
 # ==============================================================================
 import streamlit as st
 import pandas as pd
@@ -29,9 +29,9 @@ td { font-size: 16px !important; font-weight: bold !important;
 </style>
 """, unsafe_allow_html=True)
 
-# 雲端清單來源設定
+# 雲端清單來源設定（已更新為您的正確 Google 試算表 ID）
 MAIN_SHEET = {
-    "base": "https://google.com",
+    "base": "https://docs.google.com/spreadsheets/d/13Mv-7uaFyR1KcxNRVrhxCGAAntElKprB7ZeWWBxS3n0",
     "gid": "0",
 }
 
@@ -133,7 +133,7 @@ def get_yahoo_history(sid: str, max_n: int = CONFIG["MAX_HISTORY"], interval: st
     min_bars = 30 if interval in ("1wk", "1mo") else 150
     for sfx in suffixes:
         try:
-            url = f"https://yahoo.com{sid}{sfx}?range={range_str}&interval={interval}"
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sid}{sfx}?range={range_str}&interval={interval}"
             res = HTTP_SESSION.get(url, timeout=5)
             if res.status_code != 200:
                 continue
@@ -188,7 +188,7 @@ def load_main_stocks():
     tasks = []
     try:
         csv_text = fetch_sheet_csv(MAIN_SHEET["base"], MAIN_SHEET["gid"])
-        df = pd.read_csv(io.StringIO(csv_text), on_bad_lines='skip')
+        df = pd.read_csv(io.StringIO(csv_text), header=None, on_bad_lines='skip')
         for _, row in df.iterrows():
             if df.shape[1] < 2:
                 continue
@@ -196,6 +196,7 @@ def load_main_stocks():
             if pd.isna(sid_raw):
                 continue
             sid = str(sid_raw).strip()
+            # 過濾標題列與非股票代號的文字
             if not sid.replace(".", "").replace("-", "").isdigit() or len(sid) < 4:
                 continue
             sid = str(int(float(sid))) if "." in sid else sid
@@ -547,7 +548,7 @@ def run_full_scan(force_refresh_candidates=False):
         ))
     main_stocks = load_main_stocks()
     if not main_stocks:
-        st.warning("目前沒有任何股票可掃描，請檢查 Google 試算表設定。")
+        st.warning("目前沒有任何股票可掃描，請檢查 Google 試算表設定與共用權限。")
         return results
     week_key = _current_week_key()
     need_update = (
