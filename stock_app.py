@@ -1,5 +1,5 @@
 # ==============================================================================
-# 台股精選訊號監控系統（Streamlit v28.9 嚴格多頭過濾＋三度背離版）
+# 台股精選訊號監控系統（Streamlit v28.10 嚴格多頭過濾＋三度背離＋精簡版）
 # ==============================================================================
 import streamlit as st
 import pandas as pd
@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 
 # 頁面基本設定
-st.set_page_config(layout="wide", page_title="台股精選訊號 v28.9")
+st.set_page_config(layout="wide", page_title="台股精選訊號 v28.10")
 
 # 樣式調整
 st.markdown("""
@@ -396,52 +396,6 @@ def analyze_ashui_1(hist):
     }
 
 
-def analyze_piercing_line(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    ma20 = calc_ma_list(closes, 20)
-    if ma20[-1] is None or closes[-1] < ma20[-1]:
-        return None
-    d0, d1 = closes[-1], closes[-2]
-    o0, o1 = opens[-1], opens[-2]
-    if not (d1 < o1 and d0 > o0 and o0 < o1 and d0 >= (o1 + d1) / 2):
-        return None
-    return {
-        "signal": "貫穿線：上升趨勢回檔過實體中點且站上月線",
-        "direction": "買進", "side": "long",
-        "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1], lows[-2], closes[-1] * 0.97), 2),
-        "target": round(closes[-1] * 1.09, 2),
-        "how": "高勝率反轉型態，停損守近期低點",
-        "price": closes[-1],
-    }
-
-
-def analyze_three_inside_up(hist):
-    closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
-    n = len(closes)
-    if n < 60 or vols[-1] < CONFIG["MIN_VOLUME"]:
-        return None
-    ma20 = calc_ma_list(closes, 20)
-    if ma20[-1] is None or closes[-1] < ma20[-1]:
-        return None
-    d0, d1, d2 = closes[-1], closes[-2], closes[-3]
-    o0, o1, o2 = opens[-1], opens[-2], opens[-3]
-    if not ((d2 < o2) and (d1 > o1) and (o1 >= min(o2, d2)) and (d1 <= max(o2, d2)) and (d0 > o0) and (d0 > d1)):
-        return None
-    return {
-        "signal": "三內身：孕線完成後第三根確認且站上月線",
-        "direction": "買進", "side": "long",
-        "entry": round(closes[-1] * 1.005, 2),
-        "stop": round(min(lows[-1], lows[-2], lows[-3], closes[-1] * 0.97), 2),
-        "target": round(closes[-1] * 1.09, 2),
-        "how": "孕線後多方表態確認，站上月線",
-        "price": closes[-1],
-    }
-
-
 def analyze_power_candle_recovery(hist):
     closes, highs, lows, opens, vols = hist["closes"], hist["highs"], hist["lows"], hist["opens"], hist["vols"]
     n = len(closes)
@@ -588,7 +542,7 @@ def analyze_bull_divergence(hist):
 
 SIGNAL_KEYS = [
     "林恩如20週均線W底", "朱家泓頭頭高底底高",
-    "阿水一式", "貫穿線", "三內身", "大K棒收回",
+    "阿水一式", "大K棒收回",
     "RSI鈍化", "多頭背離"
 ]
 
@@ -669,8 +623,6 @@ def run_full_scan(force_refresh_candidates=False):
             ("林恩如20週均線W底", lambda h: analyze_lin_20w_w_bottom(h)),
             ("朱家泓頭頭高底底高", analyze_chujiahung_bottom),
             ("阿水一式", analyze_ashui_1),
-            ("貫穿線", analyze_piercing_line),
-            ("三內身", analyze_three_inside_up),
             ("大K棒收回", analyze_power_candle_recovery),
             ("RSI鈍化", analyze_rsi_passivation),
             ("多頭背離", analyze_bull_divergence),
@@ -825,8 +777,8 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False):
 # ==============================================================================
 # UI 主介面設定
 # ==============================================================================
-st.title("台股精選訊號 v28.9（嚴格多頭過濾＋三度背離版）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜週線+日線雙重多頭過濾｜已移除勝率表與非多頭策略")
+st.title("台股精選訊號 v28.10（精簡多頭過濾版）")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜週線+日線雙重多頭過濾｜已移除貫穿線與三內身")
 
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -856,8 +808,6 @@ tabs = st.tabs([
     "林恩如20週W底",
     "朱家泓頭頭高",
     "阿水一式",
-    "貫穿線",
-    "三內身",
     "大K棒收回",
     "RSI鈍化",
     "多頭背離（含一/二/三度）",
@@ -885,14 +835,10 @@ with tabs[2]:
 with tabs[3]:
     render_signal_tab(results.get("阿水一式", []), "阿水一式（帶寬<=0.2壓縮突破）", "2.1倍帶寬<=0.2 + 2倍均量 + 紅K突破上軌", is_bollinger=True)
 with tabs[4]:
-    render_signal_tab(results.get("貫穿線", []), "貫穿線（負上線）", "高勝率反轉 + 站上月線")
-with tabs[5]:
-    render_signal_tab(results.get("三內身", []), "三內身", "孕線確認 + 站上月線")
-with tabs[6]:
     render_signal_tab(results.get("大K棒收回", []), "大K棒強力收回", "突破恐慌陰線 + 站上月線")
-with tabs[7]:
+with tabs[5]:
     render_signal_tab(results.get("RSI鈍化", []), "RSI 鈍化", "連續5日≥70 + 站上月線與五日線")
-with tabs[8]:
+with tabs[6]:
     render_signal_tab(results.get("多頭背離", []), "一次／二度／三度多頭背離", "RSI(5) 與 RSI(10) 檢查｜支援一至三度底背離結構")
 
 st.markdown("---")
