@@ -8,12 +8,13 @@
 3. 每檔個股獨立計算各策略歷史勝率與樣本數，存成 JSON 持久記憶
 4. 掃描時只採用該檔勝率 ≥70% 的策略；低於70% 直接過濾
 5. 樣本數再少只要發生過就計入，但會明確顯示「發生N次」並標註小樣本風險
-6. 回測定義（可調整）：
-   - 訊號日收盤視為進場價
-   - 使用當日策略計算的停損 / 目標
-   - 往後最多 LOOKAHEAD=15 個交易日
-   - 先碰到目標價 → 勝；先碰到停損 → 敗
-   - 都沒碰到 → 以第15日收盤相對進場價正負判斷
+6. 回測：各策略分開出場（期滿未觸發者不計入樣本）
+   - 朱家泓：停損=訊號日低或-5%；勝=+5%後破5MA 或 先到+12%
+   - 林恩如：停損=收盤破100MA；勝=+12%
+   - 阿水一式：停損=破20MA或-5%；勝=+8%
+   - 破底翻：停損=訊號停損價；勝=+8%
+   - RSI鈍化：停損=破5MA；勝=+5%
+   - 多頭背離：停損=訊號停損價；勝=+6%
 7. 中文詳細註解、完整使用步驟見檔案底部與 UI 說明
 
 【朱家泓完全對齊文件】
@@ -562,38 +563,134 @@ STRATEGY_FUNCS = {
 }
 
 
-# ======================== 回測核心 ========================
-def evaluate_trade_outcome(hist, entry_idx, entry_price, stop_price, target_price, lookahead=CONFIG["LOOKAHEAD"]):
+# ======================== 回測核心（各策略分開出場） ========================
+# 各策略觀察天數上限（交易日）
+STRATEGY_LOOKAHEAD = {
+    "朱家泓頭頭高底底高": 18,
+    "林恩如20週均線W底": 30,
+    "阿水一式": 15,
+    "破底翻": 15,
+    "RSI鈍化": 10,
+    "多頭背離": 12,
+}
+
+
+def _ma_at(closes, end_idx, period):
+    """計算在 end_idx 當日的 MA（需有足夠資料）"""
+    if end_idx < period - 1:
+        return None
+    window = closes[end_idx - period + 1: end_idx + 1]
+    return sum(window) / period
+
+
+def evaluate_strategy_outcome(strategy_key, hist, entry_idx, signal_result):
     """
-    評估單筆交易結果。
-    回傳: True=勝, False=敗, None=無法判斷（資料不足）
-    邏輯：往後看最多 lookahead 天，先碰到目標算勝、先碰到停損算敗；
-          都沒碰到則以最後一日收盤價相對進場價判斷。
+    依策略各自的出場規則評估單筆結果。
+    回傳: True=勝, False=敗, None=期滿未觸發（不計入勝率樣本）
+
+    【各策略規則摘要】
+    - 朱家泓：停損=訊號日低或進場-5%；勝=先漲≥5%後收盤跌破5MA，或先觸+12%
+    - 林恩如：停損=收盤跌破100MA；勝=期間內最高漲幅≥12%
+    - 阿水一式：停損=跌破20MA或進場-5%；勝=先漲≥8%
+    - 破底翻：停損=再破訊號停損價（結構低）；勝=先漲≥8%
+    - RSI鈍化：停損=跌破5MA；勝=先漲≥5%
+    - 多頭背離：停損=再破訊號停損價；勝=先漲≥6%
     """
     closes = hist["closes"]
     highs = hist["highs"]
     lows = hist["lows"]
     n = len(closes)
+    entry_price = float(signal_result["price"])
+    stop_from_signal = float(signal_result.get("stop", entry_price * 0.95))
+    lookahead = STRATEGY_LOOKAHEAD.get(strategy_key, 15)
     end = min(entry_idx + lookahead, n - 1)
     if end <= entry_idx:
         return None
 
-    for i in range(entry_idx + 1, end + 1):
-        # 先看低點是否觸及停損
-        if lows[i] <= stop_price:
-            return False
-        # 再看高點是否觸及目標
-        if highs[i] >= target_price:
-            return True
+    # ----- 朱家泓：5% 或訊號日低停損；+5% 後守5MA停利，或先到+12% -----
+    if strategy_key == "朱家泓頭頭高底底高":
+        hard_stop = min(lows[entry_idx], entry_price * 0.95)
+        target_hard = entry_price * 1.12
+        target_soft = entry_price * 1.05
+        reached_soft = False
+        for i in range(entry_idx + 1, end + 1):
+            if lows[i] <= hard_stop:
+                return False
+            if highs[i] >= target_hard:
+                return True
+            if highs[i] >= target_soft:
+                reached_soft = True
+            if reached_soft:
+                ma5 = _ma_at(closes, i, 5)
+                if ma5 is not None and closes[i] < ma5:
+                    return True  # 有過+5%後跌破5MA，視為依紀律停利成功
+        return None
 
-    # 都沒碰到，用最後收盤判斷
-    return closes[end] > entry_price
+    # ----- 林恩如：收盤跌破100MA敗；最高漲幅≥12%勝 -----
+    if strategy_key == "林恩如20週均線W底":
+        for i in range(entry_idx + 1, end + 1):
+            ma100 = _ma_at(closes, i, 100)
+            if ma100 is not None and closes[i] < ma100:
+                return False
+            if highs[i] >= entry_price * 1.12:
+                return True
+        return None
+
+    # ----- 阿水一式：破20MA或-5%敗；+8%勝 -----
+    if strategy_key == "阿水一式":
+        hard_stop = entry_price * 0.95
+        for i in range(entry_idx + 1, end + 1):
+            if lows[i] <= hard_stop:
+                return False
+            ma20 = _ma_at(closes, i, 20)
+            if ma20 is not None and closes[i] < ma20:
+                return False
+            if highs[i] >= entry_price * 1.08:
+                return True
+        return None
+
+    # ----- 破底翻：破訊號停損價敗；+8%勝 -----
+    if strategy_key == "破底翻":
+        for i in range(entry_idx + 1, end + 1):
+            if lows[i] <= stop_from_signal:
+                return False
+            if highs[i] >= entry_price * 1.08:
+                return True
+        return None
+
+    # ----- RSI鈍化：破5MA敗；+5%勝 -----
+    if strategy_key == "RSI鈍化":
+        for i in range(entry_idx + 1, end + 1):
+            ma5 = _ma_at(closes, i, 5)
+            if ma5 is not None and closes[i] < ma5:
+                return False
+            if highs[i] >= entry_price * 1.05:
+                return True
+        return None
+
+    # ----- 多頭背離：破訊號停損敗；+6%勝 -----
+    if strategy_key == "多頭背離":
+        for i in range(entry_idx + 1, end + 1):
+            if lows[i] <= stop_from_signal:
+                return False
+            if highs[i] >= entry_price * 1.06:
+                return True
+        return None
+
+    # 預設後備（不應走到）
+    for i in range(entry_idx + 1, end + 1):
+        if lows[i] <= stop_from_signal:
+            return False
+        if highs[i] >= entry_price * 1.08:
+            return True
+    return None
 
 
 def backtest_one_stock(item):
     """
     對單一股票做2年回測，回傳各策略的勝率與樣本數。
     結構: {strategy_key: {"winrate": float, "wins": int, "total": int, "samples": int}}
+    注意：期滿未觸發停利/停損者不計入樣本（outcome is None）。
     """
     hist = get_yahoo_history(item["sid"], max_n=CONFIG["MAX_HISTORY"])
     if hist is None:
@@ -601,23 +698,21 @@ def backtest_one_stock(item):
 
     n = len(hist["closes"])
     results = {}
-    # 從足夠歷史後開始掃，預留 lookahead 天給結果評估
+    max_look = max(STRATEGY_LOOKAHEAD.values())
     start_idx = 120
-    end_scan = n - CONFIG["LOOKAHEAD"] - 1
+    end_scan = n - max_look - 1
 
     for key, fn in STRATEGY_FUNCS.items():
         wins = 0
         total = 0
-        # 每隔幾天掃一次，降低計算量與重疊訊號
         step = 3
-        for idx in range(start_idx, end_scan, step):
+        for idx in range(start_idx, max(start_idx + 1, end_scan), step):
             r = fn(hist, end_idx=idx)
             if r is None:
                 continue
-            outcome = evaluate_trade_outcome(
-                hist, idx, r["price"], r["stop"], r["target"]
-            )
+            outcome = evaluate_strategy_outcome(key, hist, idx, r)
             if outcome is None:
+                # 期滿沒碰到停利/停損 → 不計入勝率樣本
                 continue
             total += 1
             if outcome:
@@ -1023,18 +1118,21 @@ https://docs.google.com/spreadsheets/d/1Ba3vWS9vf2dP9fgPQIp6nJSwYYacNsNPFz7jIAOG
 2. 只顯示該檔勝率 ≥ {CONFIG['WINRATE_THRESHOLD']}% 的策略  
 3. 表格會顯示「個股勝率（樣本N）」；N 較小時標【小樣本】
 
-**回測規則（可於程式 CONFIG 調整）：**
-- 資料區間：約2年日線  
-- 進場：訊號日收盤價  
-- 停損 / 目標：使用當日策略計算值  
-- 觀察期：往後最多 {CONFIG['LOOKAHEAD']} 個交易日  
-- 先碰到目標 → 勝；先碰到停損 → 敗；都沒碰到 → 以第{CONFIG['LOOKAHEAD']}日收盤正負判斷  
-- 掃描間隔 step=3（減少重疊訊號與計算量）
+**回測規則（各策略分開出場）：**
+- 資料區間：約2年日線｜進場：訊號日收盤價  
+- **朱家泓**：停損=訊號日低或-5%；勝=+5%後收盤破5MA，或先到+12%（最多約18日）  
+- **林恩如**：停損=收盤破100MA；勝=+12%（最多約30日）  
+- **阿水一式**：停損=破20MA或-5%；勝=+8%（最多約15日）  
+- **破底翻**：停損=訊號停損價；勝=+8%（最多約15日）  
+- **RSI鈍化**：停損=破5MA；勝=+5%（最多約10日）  
+- **多頭背離**：停損=訊號停損價；勝=+6%（最多約12日）  
+- 期滿都沒碰到停利/停損 → **不計入勝率樣本**  
+- 掃描間隔 step=3  
 
 **調整方法：**
 - 想改門檻：修改 CONFIG["WINRATE_THRESHOLD"]  
-- 想改觀察天數：修改 CONFIG["LOOKAHEAD"]  
-- 想改小樣本警示門檻：修改 CONFIG["MIN_SAMPLES_WARN"]  
+- 想改各策略觀察天數：修改 STRATEGY_LOOKAHEAD  
+- 想改小樣本警示：修改 CONFIG["MIN_SAMPLES_WARN"]  
     """)
 
 col1, col2, col3, col4 = st.columns(4)
