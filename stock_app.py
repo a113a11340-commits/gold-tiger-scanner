@@ -63,6 +63,13 @@ MAIN_SHEET = {
     "gid": "0",
 }
 
+# 策略記憶用 Google 試算表（設成「知道連結的任何人可檢視」即可用 CSV 公開讀取）
+# 使用方式：回測完成 → 下載 CSV → 全選貼上覆蓋此試算表 → 之後程式自動讀取
+MEMORY_SHEET = {
+    "base": "https://docs.google.com/spreadsheets/d/1Ba3vWS9vf2dP9fgPQIp6nJSwYYacNsNPFz7jIAOGhe8",
+    "gid": "0",
+}
+
 CONFIG = {
     "MIN_VOLUME": 500000,          # 最低成交量過濾
     "MAX_HISTORY": 600,            # 拉長到約2.5年，確保2年回測足夠
@@ -71,7 +78,8 @@ CONFIG = {
     "WINRATE_THRESHOLD": 70.0,     # 只有勝率 ≥70% 的策略才會被採用
     "LOOKAHEAD": 15,               # 回測往後觀察天數
     "MIN_SAMPLES_WARN": 10,        # 樣本少於此數會標註「小樣本風險」
-    "MEMORY_FILE": "/home/workdir/artifacts/stock_strategy_memory.json",  # 持久記憶檔
+    # 本地 JSON 僅作備援（Cloud 重啟可能消失）；主要靠 MEMORY_SHEET 持久化
+    "MEMORY_FILE": "stock_strategy_memory.json",
 }
 
 HTTP_SESSION = requests.Session()
@@ -636,27 +644,133 @@ def backtest_one_stock(item):
     }
 
 
+def memory_to_dataframe(mem: dict) -> pd.DataFrame:
+    """把記憶 dict 轉成扁平 DataFrame，方便下載 CSV 與貼上試算表"""
+    rows = []
+    for sid, data in sorted(mem.items()):
+        name = data.get("name", sid)
+        updated = data.get("updated", "")
+        for skey, sdata in data.get("strategies", {}).items():
+            rows.append({
+                "代號": sid,
+                "名稱": name,
+                "策略": skey,
+                "勝率": sdata.get("winrate", 0),
+                "樣本數": sdata.get("samples", 0),
+                "更新時間": updated,
+            })
+    if not rows:
+        return pd.DataFrame(columns=["代號", "名稱", "策略", "勝率", "樣本數", "更新時間"])
+    return pd.DataFrame(rows)
+
+
+def load_memory_from_public_sheet():
+    """
+    從公開 Google 試算表（CSV export）讀取策略記憶。
+    試算表需設成「知道連結的任何人可檢視」。
+    回傳與 JSON 相同結構的 dict，失敗或空資料回傳 None / {}。
+    """
+    try:
+        csv_text = fetch_sheet_csv(MEMORY_SHEET["base"], MEMORY_SHEET["gid"])
+        if not csv_text or len(csv_text.strip()) < 10:
+            return {}
+        df = pd.read_csv(io.StringIO(csv_text))
+        # 欄位容錯（允許中英文或順序不同）
+        col_map = {}
+        for c in df.columns:
+            c_str = str(c).strip()
+            if c_str in ("代號", "sid", "股票代號", "代碼"):
+                col_map["sid"] = c
+            elif c_str in ("名稱", "name", "股票名稱"):
+                col_map["name"] = c
+            elif c_str in ("策略", "strategy", "訊號"):
+                col_map["strategy"] = c
+            elif c_str in ("勝率", "winrate", "勝率%"):
+                col_map["winrate"] = c
+            elif c_str in ("樣本數", "samples", "N", "次數"):
+                col_map["samples"] = c
+            elif c_str in ("更新時間", "updated", "時間"):
+                col_map["updated"] = c
+        if "sid" not in col_map or "strategy" not in col_map:
+            return {}
+
+        mem = {}
+        for _, row in df.iterrows():
+            sid = str(row[col_map["sid"]]).strip()
+            if not sid or sid.lower() == "nan":
+                continue
+            # 去掉可能的 .0
+            if sid.endswith(".0") and sid[:-2].isdigit():
+                sid = sid[:-2]
+            name = str(row[col_map["name"]]).strip() if "name" in col_map else sid
+            strategy = str(row[col_map["strategy"]]).strip()
+            if not strategy or strategy.lower() == "nan":
+                continue
+            try:
+                wr = float(row[col_map["winrate"]]) if "winrate" in col_map else 0.0
+            except Exception:
+                wr = 0.0
+            try:
+                samples = int(float(row[col_map["samples"]])) if "samples" in col_map else 0
+            except Exception:
+                samples = 0
+            updated = str(row[col_map["updated"]]).strip() if "updated" in col_map else ""
+
+            if sid not in mem:
+                mem[sid] = {"name": name, "updated": updated, "strategies": {}}
+            mem[sid]["strategies"][strategy] = {
+                "winrate": wr,
+                "wins": 0,
+                "total": samples,
+                "samples": samples,
+            }
+            if updated and (not mem[sid].get("updated") or updated > mem[sid]["updated"]):
+                mem[sid]["updated"] = updated
+                mem[sid]["name"] = name
+        return mem
+    except Exception as e:
+        # 不打斷流程，只在需要時提示
+        return None
+
+
 def load_memory():
-    """讀取持久記憶 JSON"""
+    """
+    優先順序：
+    1. 公開 Google 試算表（MEMORY_SHEET）← 主要持久化方式
+    2. 本地 JSON（備援）
+    3. 空 dict
+    """
+    gmem = load_memory_from_public_sheet()
+    if gmem is not None and len(gmem) > 0:
+        return gmem
+
     path = CONFIG["MEMORY_FILE"]
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict) and data:
+                    return data
         except Exception:
-            return {}
+            pass
     return {}
 
 
 def save_memory(mem):
-    """寫入持久記憶"""
+    """
+    本地 JSON 盡力寫入（Cloud 可能失敗）；真正持久化靠使用者下載 CSV 貼到試算表。
+    回傳是否成功寫入本地。
+    """
     path = CONFIG["MEMORY_FILE"]
     try:
+        dir_name = os.path.dirname(path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(mem, f, ensure_ascii=False, indent=2)
         return True
     except Exception as e:
-        st.error(f"寫入記憶檔失敗: {e}")
+        st.warning(f"寫入本地記憶檔失敗（不影響本次 session，請用下方「下載記憶 CSV」保存）：{e}")
         return False
 
 
@@ -893,15 +1007,21 @@ with st.expander("使用說明與回測規則", expanded=True):
 **完整使用步驟**
 
 **第一次使用（或想更新股性記憶時）：**
-1. 點「**回測所有個股策略勝率（2年）**」按鈕  
-2. 等待完成（可能需數分鐘至十幾分鐘，視股票數量與網路狀況）  
-3. 完成後會自動寫入本地記憶檔 `{CONFIG['MEMORY_FILE']}`  
-4. 之後掃描會自動讀取這份記憶
+1. 點「**回測所有個股策略勝率（2年）**」  
+2. 等待完成（約 1000+ 檔，可能需數分鐘～十幾分鐘）  
+3. **立刻按「下載記憶 CSV」** → 開啟你的記憶試算表 → 全選刪除舊資料 → 貼上覆蓋並保存  
+4. 接著按「掃描訊號」即可使用  
+
+**記憶試算表（請設成「知道連結的任何人可檢視」）：**  
+https://docs.google.com/spreadsheets/d/1Ba3vWS9vf2dP9fgPQIp6nJSwYYacNsNPFz7jIAOGhe8  
+
+**之後 Cloud 重啟／換裝置：**  
+程式會自動用公開 CSV 讀取上述試算表，不必重跑回測（只要你有貼過最新 CSV）。
 
 **平常操作：**
 1. 直接點「掃描訊號（全部股票）」  
-2. 系統只會顯示「該檔個股在該策略上歷史勝率 ≥ {CONFIG['WINRATE_THRESHOLD']}%」的訊號  
-3. 表格會顯示「個股勝率（樣本N）」；若 N 較小會標註【小樣本】
+2. 只顯示該檔勝率 ≥ {CONFIG['WINRATE_THRESHOLD']}% 的策略  
+3. 表格會顯示「個股勝率（樣本N）」；N 較小時標【小樣本】
 
 **回測規則（可於程式 CONFIG 調整）：**
 - 資料區間：約2年日線  
@@ -917,12 +1037,22 @@ with st.expander("使用說明與回測規則", expanded=True):
 - 想改小樣本警示門檻：修改 CONFIG["MIN_SAMPLES_WARN"]  
     """)
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     do_scan = st.button("掃描訊號（全部股票）", use_container_width=True)
 with col2:
     do_backtest = st.button("回測所有個股策略勝率（2年）", type="primary", use_container_width=True)
 with col3:
+    if st.button("從試算表重新載入記憶", use_container_width=True):
+        st.cache_data.clear()  # 清掉 CSV 快取，強制重抓
+        fresh = load_memory_from_public_sheet()
+        if fresh is not None and len(fresh) > 0:
+            st.session_state["strategy_memory"] = fresh
+            st.success(f"已從試算表載入 {len(fresh)} 檔記憶")
+        else:
+            st.warning("試算表無資料或讀取失敗，請確認已貼上 CSV 且設為「知道連結可檢視」")
+        st.rerun()
+with col4:
     if st.button("清除快取與掃描結果", use_container_width=True):
         st.cache_data.clear()
         SYMBOL_CACHE.clear()
@@ -934,13 +1064,30 @@ if do_backtest:
     with st.spinner("正在進行全市場個股策略回測（2年），請勿關閉頁面…"):
         mem = run_full_backtest()
         if mem:
-            st.success(f"回測完成並已更新記憶，共 {len(mem)} 檔")
+            st.session_state["strategy_memory"] = mem
+            memory = mem
+            st.success(f"回測完成並已更新記憶，共 {len(mem)} 檔。")
+            st.warning(
+                "【重要】請立刻下載下方 CSV，開啟你的記憶試算表 → 全選清空 → 貼上覆蓋。"
+                "這樣 Cloud 重啟後程式才能自動讀回記憶，不必重跑回測。"
+            )
+            df_dl = memory_to_dataframe(mem)
+            st.download_button(
+                label="⬇️ 下載記憶 CSV（請貼到 Google 試算表保存）",
+                data=df_dl.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"strategy_memory_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
         else:
             st.error("回測失敗或無資料")
 
+# 每次都從 session_state 重新取得最新記憶
+memory = st.session_state.get("strategy_memory", {})
+
 if do_scan:
     if not memory:
-        st.error("尚未建立任何回測記憶，請先按「回測所有個股策略勝率（2年）」建立股性資料。")
+        st.error("尚未建立任何回測記憶。請先按「回測所有個股策略勝率（2年）」，或確認記憶試算表已貼上資料。")
     else:
         with st.spinner("掃描中（僅採用 ≥70% 策略）..."):
             st.session_state["scan_results_doc"] = run_full_scan(memory)
@@ -948,9 +1095,15 @@ if do_scan:
 
 # 顯示記憶狀態
 if memory:
-    st.caption(f"目前記憶檔共 {len(memory)} 檔個股｜最後更新時間以各檔為準")
+    st.caption(
+        f"目前記憶共 {len(memory)} 檔個股｜"
+        f"來源優先：公開試算表 → 本地 JSON → 本次 session"
+    )
 else:
-    st.info("目前沒有回測記憶，請先執行「回測所有個股策略勝率（2年）」。")
+    st.info(
+        "目前沒有回測記憶。請先執行「回測所有個股策略勝率（2年）」，"
+        "或把已下載的 CSV 貼到記憶試算表後重新整理頁面。"
+    )
 
 results = st.session_state.get("scan_results_doc", {})
 if not results and memory:
