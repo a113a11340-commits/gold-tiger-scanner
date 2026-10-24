@@ -770,22 +770,36 @@ def load_memory_from_public_sheet():
         if not csv_text or len(csv_text.strip()) < 10:
             return {}
         df = pd.read_csv(io.StringIO(csv_text))
-        # 欄位容錯（允許中英文或順序不同）
+        # 欄位容錯：名稱模糊比對 + 固定欄序備援
+        # 預期欄序：代號,名稱,策略,勝率,樣本數,更新時間
         col_map = {}
         for c in df.columns:
-            c_str = str(c).strip()
+            c_str = str(c).strip().replace("%", "").replace(" ", "")
             if c_str in ("代號", "sid", "股票代號", "代碼"):
                 col_map["sid"] = c
             elif c_str in ("名稱", "name", "股票名稱"):
                 col_map["name"] = c
-            elif c_str in ("策略", "strategy", "訊號"):
+            elif "策略" in c_str or c_str in ("strategy", "訊號"):
                 col_map["strategy"] = c
-            elif c_str in ("勝率", "winrate", "勝率%"):
+            elif "勝率" in c_str or c_str in ("winrate",):
                 col_map["winrate"] = c
-            elif c_str in ("樣本數", "samples", "N", "次數"):
+            elif "樣本" in c_str or c_str in ("samples", "N", "次數", "樣本數N"):
                 col_map["samples"] = c
-            elif c_str in ("更新時間", "updated", "時間"):
+            elif "更新" in c_str or c_str in ("updated", "時間"):
                 col_map["updated"] = c
+        cols = list(df.columns)
+        if "sid" not in col_map and len(cols) >= 1:
+            col_map["sid"] = cols[0]
+        if "name" not in col_map and len(cols) >= 2:
+            col_map["name"] = cols[1]
+        if "strategy" not in col_map and len(cols) >= 3:
+            col_map["strategy"] = cols[2]
+        if "winrate" not in col_map and len(cols) >= 4:
+            col_map["winrate"] = cols[3]
+        if "samples" not in col_map and len(cols) >= 5:
+            col_map["samples"] = cols[4]
+        if "updated" not in col_map and len(cols) >= 6:
+            col_map["updated"] = cols[5]
         if "sid" not in col_map or "strategy" not in col_map:
             return {}
 
@@ -794,10 +808,11 @@ def load_memory_from_public_sheet():
             sid = str(row[col_map["sid"]]).strip()
             if not sid or sid.lower() == "nan":
                 continue
-            # 去掉可能的 .0
-            if sid.endswith(".0") and sid[:-2].isdigit():
+            if sid.endswith(".0") and sid[:-2].replace(".", "").isdigit():
                 sid = sid[:-2]
             name = str(row[col_map["name"]]).strip() if "name" in col_map else sid
+            if name.lower() == "nan":
+                name = sid
             strategy = str(row[col_map["strategy"]]).strip()
             if not strategy or strategy.lower() == "nan":
                 continue
@@ -809,7 +824,12 @@ def load_memory_from_public_sheet():
                 samples = int(float(row[col_map["samples"]])) if "samples" in col_map else 0
             except Exception:
                 samples = 0
+            # 樣本為 0 時勝率視為無效，避免出現「100% 但 N=0 還可用」
+            if samples <= 0:
+                wr = 0.0
             updated = str(row[col_map["updated"]]).strip() if "updated" in col_map else ""
+            if updated.lower() == "nan":
+                updated = ""
 
             if sid not in mem:
                 mem[sid] = {"name": name, "updated": updated, "strategies": {}}
@@ -823,8 +843,7 @@ def load_memory_from_public_sheet():
                 mem[sid]["updated"] = updated
                 mem[sid]["name"] = name
         return mem
-    except Exception as e:
-        # 不打斷流程，只在需要時提示
+    except Exception:
         return None
 
 
@@ -945,14 +964,12 @@ def run_full_scan(memory):
         found = []
         stats = get_stock_strategy_stats(item["sid"], memory)
         for key, fn in STRATEGY_FUNCS.items():
-            # 若有記憶且該策略勝率 < 門檻，直接跳過
-            if stats and key in stats:
-                wr = stats[key].get("winrate", 0)
-                samples = stats[key].get("samples", 0)
-                if wr < CONFIG["WINRATE_THRESHOLD"]:
-                    continue
-            else:
-                # 沒有回測資料的股票，暫時不採用任何策略（強制先回測）
+            # 必須：有記憶、樣本>0、勝率≥門檻
+            if not stats or key not in stats:
+                continue
+            wr = float(stats[key].get("winrate", 0) or 0)
+            samples = int(stats[key].get("samples", 0) or 0)
+            if samples <= 0 or wr < CONFIG["WINRATE_THRESHOLD"]:
                 continue
 
             r = fn(hist)  # 最新訊號
@@ -1255,10 +1272,18 @@ with tabs[7]:
             updated = data.get("updated", "-")
             for skey, sdata in data.get("strategies", {}).items():
                 wr = sdata.get("winrate", 0)
-                samples = sdata.get("samples", 0)
-                flag = "✅可用" if wr >= CONFIG["WINRATE_THRESHOLD"] else "❌過濾"
-                if samples < CONFIG["MIN_SAMPLES_WARN"] and samples > 0:
-                    flag += "【小樣本】"
+                samples = int(sdata.get("samples", 0) or 0)
+                wr = float(wr or 0)
+                if samples <= 0:
+                    flag = "❌無樣本"
+                elif wr >= CONFIG["WINRATE_THRESHOLD"]:
+                    flag = "✅可用"
+                    if samples < CONFIG["MIN_SAMPLES_WARN"]:
+                        flag += "【小樣本】"
+                else:
+                    flag = "❌過濾"
+                    if samples < CONFIG["MIN_SAMPLES_WARN"]:
+                        flag += "【小樣本】"
                 rows.append({
                     "代號": sid,
                     "名稱": name,
