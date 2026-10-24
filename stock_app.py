@@ -73,10 +73,10 @@ MEMORY_SHEET = {
 
 CONFIG = {
     "MIN_VOLUME": 500000,          # 最低成交量過濾
-    "MAX_HISTORY": 600,            # 拉長到約2.5年，確保2年回測足夠
+    "MAX_HISTORY": 1000,            # 拉長到約2.5年，確保2年回測足夠
     "BATCH_WORKERS": 12,           # 回測時降低並行，減少 Yahoo 限流
     "CACHE_TTL": 300,
-    "WINRATE_THRESHOLD": 70.0,     # 只有勝率 ≥70% 的策略才會被採用
+    "WINRATE_THRESHOLD": 60.0,     # 只有勝率 ≥60% 的策略才會被採用
     "LOOKAHEAD": 15,               # 回測往後觀察天數
     "MIN_SAMPLES_WARN": 10,        # 樣本少於此數會標註「小樣本風險」
     # 本地 JSON 僅作備援（Cloud 重啟可能消失）；主要靠 MEMORY_SHEET 持久化
