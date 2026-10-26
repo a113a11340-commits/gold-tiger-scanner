@@ -72,10 +72,10 @@ MEMORY_SHEET = {
 CONFIG = {
     "MIN_VOLUME": 500000,          # 最低成交量過濾
     "MAX_HISTORY": 1000,            # 拉長到約2.5年，確保2年回測足夠
-    "BATCH_WORKERS": 200,           # 回測時降低並行，減少 Yahoo 限流  原本20
+    "BATCH_WORKERS": 12,           # 回測時降低並行，減少 Yahoo 限流
     "CACHE_TTL": 300,
-    "WINRATE_THRESHOLD": 51.0,     # 只有勝率 ≥51% 的策略才會被採用  
-    "LOOKAHEAD": 1,               # 回測往後觀察天數 原本15
+    "WINRATE_THRESHOLD": 51.0,     # 只有勝率 ≥51% 的策略才會被採用
+    "LOOKAHEAD": 15,               # 回測往後觀察天數
     "MIN_SAMPLES_WARN": 10,        # 樣本少於此數會標註「小樣本風險」
     # 本地 JSON 僅作備援（Cloud 重啟可能消失）；主要靠 MEMORY_SHEET 持久化
     "MEMORY_FILE": "stock_strategy_memory.json",
@@ -845,7 +845,7 @@ def get_stock_strategy_stats(sid, memory):
     return memory[sid].get("strategies", {})
 
 
-# ======================== 掃描（只採用 ≥70% 策略） ========================
+# ======================== 掃描（只採用 ≥51% 策略） ========================
 def run_full_scan(memory):
     results = {k: [] for k in SIGNAL_KEYS}
 
@@ -965,7 +965,7 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False, show_extra=
     if note:
         st.caption(note)
     if not data_list:
-        st.info("目前沒有符合的個股（可能因勝率未達70%、尚未回測、或當日無訊號）。")
+        st.info("目前沒有符合的個股（可能因勝率未達51%、尚未回測、或當日無訊號）。")
         return
     st.markdown(f"**共 {len(data_list)} 檔**")
     rows_html = []
@@ -1009,7 +1009,7 @@ def render_signal_tab(data_list, title, note="", is_bollinger=False, show_extra=
 
 # ======================== UI ========================
 st.title("台股精選訊號（個股獨立回測勝率版）")
-st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜每檔個股獨立計算策略勝率｜僅採用 ≥70%｜真正swing頭頭高底底高")
+st.caption(f"{time.strftime('%Y-%m-%d %H:%M')}｜每檔個股獨立計算策略勝率｜僅採用 ≥51%｜真正swing頭頭高底底高")
 
 st.warning(
     "【重要風險提示】\n"
@@ -1112,7 +1112,7 @@ if do_scan:
     if not memory:
         st.error("尚未建立任何回測記憶。請先按「回測所有個股策略勝率（2年）」，或確認記憶試算表已貼上資料。")
     else:
-        with st.spinner("掃描中（僅採用 ≥70% 策略）..."):
+        with st.spinner("掃描中（僅採用 ≥51% 策略）..."):
             st.session_state["scan_results_doc"] = run_full_scan(memory)
         st.success("掃描完成")
 
@@ -1130,7 +1130,7 @@ else:
 
 results = st.session_state.get("scan_results_doc", {})
 if not results and memory:
-    st.info("請按「掃描訊號（全部股票）」開始計算（只會出現該檔勝率≥70%的策略）。")
+    st.info("請按「掃描訊號（全部股票）」開始計算（只會出現該檔勝率≥51%的策略）。")
 
 tabs = st.tabs([
     "衝突彙整",
@@ -1155,19 +1155,19 @@ with tabs[1]:
     render_signal_tab(
         results.get("朱家泓頭頭高底底高", []),
         "朱家泓貼文件版（真正swing + 回後買上漲）",
-        "L1→H1→L2→H2｜回後買上漲優先｜高檔過濾｜僅顯示該檔勝率≥70%",
+        "L1→H1→L2→H2｜回後買上漲優先｜高檔過濾｜僅顯示該檔勝率≥51%",
         show_extra=True
     )
 with tabs[2]:
-    render_signal_tab(results.get("林恩如20週均線W底", []), "林恩如 20 週均線 W 底", "站上100MA + W底不再破底 + 帶量｜僅≥70%")
+    render_signal_tab(results.get("林恩如20週均線W底", []), "林恩如 20 週均線 W 底", "站上100MA + W底不再破底 + 帶量｜僅≥51%")
 with tabs[3]:
-    render_signal_tab(results.get("阿水一式", []), "阿水一式", "2.1倍帶寬≤0.2 + 2倍均量 + 紅K突破上軌｜僅≥70%", is_bollinger=True)
+    render_signal_tab(results.get("阿水一式", []), "阿水一式", "2.1倍帶寬≤0.2 + 2倍均量 + 紅K突破上軌｜僅≥51%", is_bollinger=True)
 with tabs[4]:
-    render_signal_tab(results.get("破底翻", []), "破底翻", "破前低後快速收回 + 站上月線｜僅≥70%")
+    render_signal_tab(results.get("破底翻", []), "破底翻", "破前低後快速收回 + 站上月線｜僅≥51%")
 with tabs[5]:
-    render_signal_tab(results.get("RSI鈍化", []), "RSI 鈍化", "連續5日≥70 + 站上五日線｜僅≥70%")
+    render_signal_tab(results.get("RSI鈍化", []), "RSI 鈍化", "連續5日≥70 + 站上五日線｜僅≥51%")
 with tabs[6]:
-    render_signal_tab(results.get("多頭背離", []), "多頭背離", "RSI5／RSI10 價新低RSI未新低｜僅≥70%")
+    render_signal_tab(results.get("多頭背離", []), "多頭背離", "RSI5／RSI10 價新低RSI未新低｜僅≥51%")
 
 with tabs[7]:
     st.markdown("### 個股策略記憶總覽（來自最近一次回測）")
